@@ -69,7 +69,7 @@ scripts/         # asset checks
 
 ## Brand and loading icon
 
-The header and favicons use the blue C with soft relief shading. The homepage
+The header uses the blue CAD wordmark and favicons use C, both with soft relief shading. The homepage
 and repository README use the TEXT2CAD PNG. `/icon` provides downloadable
 C, CAD and TEXT2CAD SVGs and PNGs, followed by the original animated loading-icon
 playground. The original mesh, animation and the shared UI loading assets stay
@@ -102,3 +102,24 @@ npm --prefix apps/docs run icon:verify
 
 `npm run check` also generates and verifies the GLB, checking closed meshes,
 face winding, flush roots, rigid crowns, endpoints and the orbit loop.
+
+## Visual system
+
+The site uses shadcn's neutral light surfaces and the viewer's charcoal dark
+surfaces, system sans-serif type, and the same 0.625rem radius scale. Blue primary
+actions use muted shades of the logo's pastel blue through shadcn semantic
+tokens: #2c7197 in light mode and #30779d in dark mode, with #f5fbff labels.
+Text contrast is 5.14:1 and 4.73:1 respectively; the solid darker hover shades
+also exceed 4.5:1. Focus rings use a deeper brand blue on white and the logo's
+pale highlight on charcoal. All installation Copy buttons use the same blue
+primary action style. Install uses the same heading scale as Skills. The header lists Install, Skills
+and Plugins, with Install active by default and the active link following the
+visible section. Install has one Skills CLI command; Plugins contains only
+provider-native installation commands and guidance. Install boxes and explanatory text fill the content width.
+Command text remains monospace. The unboxed wordmark and one prominent tagline
+sit above the independently framed CAD demo. “100% open source and free.” follows
+“Give your agent CAD superpowers.” in blue, using a lighter brand shade on dark
+surfaces. The app owns
+its tokens and primitives in `src/app/globals.css` and `src/components/ui/`,
+without importing another app or the CAD UI package. Keep the palette aligned
+with `packages/ui/src/styles/tokens.css` when the viewer's base theme changes.
