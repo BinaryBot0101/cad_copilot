@@ -109,12 +109,13 @@ on its own would fetch the previous RELEASE from PyPI over your working copy.
 
 `packages/cadgen/src/cadgen/_runtime/` is BUILT, not committed — the whole
 directory is gitignored, and the wheel is the only place those files ship. A
-fresh clone therefore has no Node builders, no snapshot browser bundle and no
-Viewer client until `scripts/bundle/bundle.sh` runs, and cadgen says so by name
-the first time it reaches for one. `scripts/test/test-python.sh` and
-`scripts/test/test-global.sh` build the two stages they read if they are
-missing, so this step is about having the whole thing, including the Viewer
-client the wheel carries.
+fresh clone therefore has no Node builders, no snapshot browser bundle, no
+Viewer client and no file tracer -- so it builds no model -- until
+`scripts/bundle/bundle.sh` runs, and cadgen says so by name the first time it
+reaches for one. `scripts/test/test-python.sh` and `scripts/test/test-global.sh`
+build the stages they read if they are missing (the tracer for this machine
+only), so this step is about having the whole thing, including the Viewer client
+and every platform's tracer the wheel carries.
 
 For CAD Viewer development:
 
@@ -250,6 +251,10 @@ and package Markdown is test input and follows its owning component.
 A skipped job satisfies its required check. Renaming a job renames its required
 check, so it lands together with a matching branch-protection update.
 
+Every job has a timeout of about twice its slowest recent run, so a hang fails
+in minutes. Within a Python suite, a test file still running after 15 minutes
+prints every thread's stack and fails by name.
+
 A web-only edit does not run the Python engine. A UI edit exercises the web
 host. Core changes reach every consumer. Policy checks for a host edit do not
 also run every skill CLI suite. Windows runs the Python package suite because
@@ -262,8 +267,9 @@ optional review screenshots produced by `--out`. Capture timing stays in the
 job log, so a stalled screenshot still leaves useful state diagnostics.
 
 **The packaged runtime is built per job**, not built once and passed between
-them: `ensure_packaged_runtime` takes ~13 s, and an artifact would serialise
-every test job behind a bundle job for longer than that.
+them: `ensure_packaged_runtime` takes ~13 s plus the host's file tracer (seconds
+with zig's cache warm; setup-deps caches it per zig version), and an artifact would
+serialise every test job behind a bundle job for longer than that.
 
 **Flakes are fixed by mechanism or deleted — never skipped, retried, or tuned.**
 Classify first: a real bug, a retired behaviour, or a platform problem. Then fix
@@ -501,7 +507,10 @@ they are wrong.
 
 `main` is source. Everything cadgen executes that is not Python — the Node
 builders and the snapshot browser bundle under `cadgen/_runtime/node` and
-`_runtime/browser`, and the CAD Viewer client under `_runtime/viewer` — is
+`_runtime/browser`, the CAD Viewer client under `_runtime/viewer`, and the file
+tracer every build loads under `_runtime/native` (one C file,
+`packages/cadgen/native/filetrace.c`, cross-compiled by zig for every platform
+into the one wheel; `ziglang` comes with `requirements-dev.txt`) — is
 gitignored and produced by `scripts/bundle/bundle.sh`. Nothing built is ever
 committed: a rebundle used to add a megabyte of history per commit, and a
 committed bundle can drift from the source that claims to produce it.
@@ -552,7 +561,7 @@ is involved) and deletes the branch. The merged commit is THE release commit.
    the release commit carries none of it — then `check-builds.sh`, the docs and
    code tests, the wheel-contents check, `python -m build`, and an `unzip -l`
    assertion that the wheel about to ship really holds `_runtime/node`,
-   `_runtime/browser` and `_runtime/viewer`.
+   `_runtime/browser`, `_runtime/viewer` and every `_runtime/native` tracer.
 3. Install test: the built wheel into a fresh venv — `cadgen --help`, `cadgen
    viewer --help`, `cadgen doctor skills/cad` — then
    `scripts/test/test-installed.sh --wheel <built-wheel>`; the distribution is uploaded as a workflow

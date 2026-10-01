@@ -51,6 +51,10 @@ class LoadedStepScene:
     source_closure_hash: str | None = None
     source_closure_files: tuple[str, ...] = ()
     source_closure_file_hashes: dict[str, str] = field(default_factory=dict)
+    # Sliced helper files -> the names the build reached in them (record.closure.names)
+    # and their whole-file hashes (record.closure.wholes).
+    source_closure_names: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    source_closure_wholes: dict[str, str] = field(default_factory=dict)
     # Literals imported from model files, tracked by value (record.constants).
     source_closure_constants: dict[str, dict[str, str]] = field(default_factory=dict)
     # `cadgen step build IN OUT` only: the INPUT document's content hash (the
@@ -67,6 +71,11 @@ class LoadedStepScene:
     # occurrences (interference) walk this tree instead when present.
     instance_occurrence_tree: dict[str, Any] | None = None
     doc: Any | None = None
+    # A reference scene (cadgen.store._references.source_scene) decodes its
+    # prototypes only to classify the topology for the adaptive edge policy;
+    # the build reads geometry from the pinned trees. The generator may drop
+    # them once that policy is decided, before the export owns its own copy.
+    disposable_prototypes: bool = False
 
 
 @dataclass(frozen=True)

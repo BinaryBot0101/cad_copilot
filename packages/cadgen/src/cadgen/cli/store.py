@@ -66,7 +66,7 @@ def _cmd_info(as_json: bool) -> int:
         "output": "output entries (path -> model)",
         "component": "component entries",
         "surface": "surface entries",
-        "op": "op-memo entries",
+        "bounds": "bounding boxes",
         "mesh": "mesh entries",
         "drawing": "drawing render payloads",
     }
@@ -103,6 +103,21 @@ def _cmd_why(target: str, as_json: bool) -> int:
     return code
 
 
+def _closure_file_label(rel: str, names: dict) -> str:
+    """``lib/geo.py[plane, cyl_along]`` for a sliced file (its reached names,
+    the first six), the bare path for a file tracked whole, and ``lib/__init__.py
+    (must stay absent)`` for a file the imports rely on not existing."""
+    if rel.startswith("!"):
+        return f"{rel[1:]} (must stay absent)"
+    if rel.endswith("/"):
+        return f"{rel} (listing)"
+    if rel not in names:
+        return rel
+    reached = list(names[rel])
+    shown = ", ".join(reached[:6]) + (f", +{len(reached) - 6}" if len(reached) > 6 else "")
+    return f"{rel}[{shown}]"
+
+
 def _why_one(model: str, as_json: bool) -> int:
     verdict = stale(model)
     record = read_record(model)
@@ -136,7 +151,8 @@ def _why_one(model: str, as_json: bool) -> int:
                 print(f"        [{omark}] {output.get('path')}  {output.get('why') or ''}")
     if record:
         closure = record.get("closure") or {}
-        print(f"closure {str(closure.get('hash'))[:12]}  files: {', '.join(closure.get('files') or [])}")
+        names = closure.get("names") or {}
+        print(f"closure {str(closure.get('hash'))[:12]}  files: {', '.join(_closure_file_label(rel, names) for rel in closure.get('files') or [])}")
     if tree:
         print(f"tree    components {len(tree.get('components') or {})}  occurrences {len(tree.get('occurrences') or [])}  links {len(tree.get('links') or [])}")
         for link in tree.get("links") or []:

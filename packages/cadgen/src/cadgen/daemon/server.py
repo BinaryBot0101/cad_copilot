@@ -55,9 +55,12 @@ CLIENT_LIVENESS_INTERVAL_SECONDS = 0.5
 # Read-only waiters are independent of build admission and cannot block accept().
 # Saturation returns an immediate ledger snapshot, never starts more threads.
 _JOB_WATCH_SLOTS = threading.BoundedSemaphore(32)
-# A worker that produces NO frame for this long mid-job is treated as wedged. Generous:
-# a large model can legitimately be silent for many minutes inside one OCCT boolean.
-WORKER_SILENCE_TIMEOUT_SECONDS = 3600.0
+# A worker that produces NO frame for this long mid-job, and whose CPU clock did not
+# move meanwhile, is treated as wedged and killed (pool.Worker.frames). A running job
+# heartbeats every worker.HEARTBEAT_INTERVAL_SECONDS (10 s), so this is a dozen missed
+# beats: slack for a scheduler starved under memory pressure, not for a long body. A
+# long body beats; one OCCT call that holds the GIL longer than this shows as CPU.
+WORKER_SILENCE_TIMEOUT_SECONDS = 120.0
 # How long a starting daemon waits for a held singleton lock before standing down (_bind).
 # A predecessor that has stopped serving may still hold it: for a moment in this version,
 # and through its whole pool shutdown (about half a second per warm worker) in earlier

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from functools import lru_cache
 from typing import Any
 
 from cadgen.store.index import read_entry, write_entry
@@ -63,9 +64,32 @@ def producer_fields(value: dict) -> dict:
     return {key: item for key, item in value.items() if key != "producerKey"}
 
 
+@lru_cache(maxsize=1)
+def kernel_versions() -> tuple[str, str, str]:
+    """The loaded build123d, OCP and cadquery-ocp-novtk versions: who produced
+    a derived fact (an extracted surface, a measured box).
+
+    OCP.__version__ is exported by the native extension, not inferred from
+    build123d. An unknown version is a ValueError: a derived fact must never
+    share an identity with an unrelated kernel build.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    import OCP
+    import build123d
+
+    try:
+        distribution = version("cadquery-ocp-novtk")
+    except PackageNotFoundError as error:
+        raise ValueError("a derived fact needs the cadquery-ocp-novtk distribution") from error
+    versions = (getattr(build123d, "__version__", None), getattr(OCP, "__version__", None), distribution)
+    if any(not isinstance(value, str) or not value.strip() or "unknown" in value.lower() for value in versions):
+        raise ValueError("a derived fact needs known build123d and OCP versions")
+    return versions
+
+
 def producer_identity() -> dict:
-    from cadgen._internal.op_memo import _runtime_versions
-    build123d, ocp, distribution = _runtime_versions()
+    build123d, ocp, distribution = kernel_versions()
     identity = {"scheme": EXTRACTION_SCHEME, "surfFormat": SURF_FORMAT,
                 "build123d": build123d, "ocp": ocp, "cadqueryOcp": distribution}
     validate_producer(identity)

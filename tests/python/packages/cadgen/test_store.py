@@ -57,10 +57,6 @@ class StoreCase(unittest.TestCase):
                 os.environ["CADGEN_CACHE_DIR"] = self.previous
 
         self.addCleanup(restore)
-        from cadgen.store.closure import forget_model_files
-
-        forget_model_files()
-        self.addCleanup(forget_model_files)
 
     # --- fixtures -------------------------------------------------------------
 
@@ -276,14 +272,15 @@ class ClosureBoundaryRule(StoreCase):
                 "entryKind": "part",
                 "sourceKind": "python",
                 "tree": self.tree_for("mirror"),
-                "closure": {"hash": closure.hash, "files": list(closure.files), "static": False},
+                "closure": closure.as_json(),
                 "constants": closure.constants,
                 "children": [],
                 "outputs": {},
             },
         )
         self.assertEqual({"handlebar.py": {"MIRROR_MOUNT_LEFT"}}, {k: set(v) for k, v in closure.constants.items()})
-        self.assertNotIn("handlebar.py", closure.files)
+        # Importing handlebar runs its module body here: it is in by what that runs.
+        self.assertTrue(closure.shas["handlebar.py"].startswith("islice1:"))
 
     def test_a_comment_edit_to_the_constants_module_leaves_the_importer_current(self) -> None:
         mirror = self._mirror_over(self.HANDLEBAR)
@@ -297,11 +294,18 @@ class ClosureBoundaryRule(StoreCase):
     def test_changing_the_constant_value_makes_the_importer_stale(self) -> None:
         from cadgen.store.gate import stale
 
+        # Computed at import: the module-level code computing it is import-time code.
         mirror = self._mirror_over(self.HANDLEBAR)
         self._record_with_constants(mirror)
         handlebar = self.root / "handlebar.py"
         handlebar.write_text(handlebar.read_text(encoding="utf-8").replace("_TOP[0] - 16.0", "_TOP[0] - 21.0"), encoding="utf-8")
         self.assertEqual(2, self.stale_clause(mirror))
+        self.assertIn("handlebar.py", stale(mirror).reason())
+        # A literal is a value the importer took: compared by value.
+        literal = self.HANDLEBAR.replace("(_TOP[0] - 16.0, 40.0, _TOP[2] + 6.0)", "(-120.0, 40.0, 15.0)")
+        mirror = self._mirror_over(literal)
+        self._record_with_constants(mirror)
+        handlebar.write_text(textwrap.dedent(literal.replace("-120.0", "-125.0")), encoding="utf-8")
         self.assertIn("constant changed: MIRROR_MOUNT_LEFT in handlebar.py", stale(mirror).reason())
 
     def test_an_unhashable_constant_is_a_source_edge(self) -> None:
@@ -373,8 +377,17 @@ class ClosureBoundaryRule(StoreCase):
             ),
             encoding="utf-8",
         )
-        sources = {p.name for p in static_closure(finger).source_files}
-        self.assertEqual(sources, {"digits.py", "chain.py", "common.py", "palette.py"})
+        closure = static_closure(finger)
+        sources = {p.name for p in closure.source_files}
+        # The package executes on import (its preamble), digits.py reaches
+        # chain.LENGTH and common.attach by name, and its star import makes
+        # digits.py and palette.py whole.
+        self.assertEqual(sources, {"__init__.py", "digits.py", "chain.py", "common.py", "palette.py"})
+        names = {p.name: v for p, v in closure.names.items()}
+        self.assertEqual(names["chain.py"], ("LENGTH",))
+        self.assertEqual(names["common.py"], ("attach",))
+        self.assertIsNone(names["digits.py"])
+        self.assertIsNone(names["palette.py"])
 
 
 class HashAtExecution(StoreCase):
@@ -528,10 +541,11 @@ class TreeBounds(StoreCase):
     def test_translations_reuse_the_same_tight_box_in_memory_and_on_disk(self) -> None:
         from build123d import Compound, Location
 
-        from cadgen._internal import component_package, op_memo
+        from cadgen._internal import component_package
+        from cadgen.store import bounds
         from cadgen.store.build import build_tree_from_compound
 
-        op_memo.clear()
+        bounds.clear()
 
         def bank(offset: float) -> Compound:
             left = Location((-20, 0, 0)) * self.nurbs_cylinder()
@@ -553,13 +567,13 @@ class TreeBounds(StoreCase):
 
             # Cleared memory: the second build reads the disk tier, so an
             # unchanged assembly measures nothing at all.
-            op_memo.clear()
+            bounds.clear()
             calls.clear()
             _h, warm, _s = build_tree_from_compound(bank(0), root_name="bank")
             self.assertEqual(len(calls), 0, "an unchanged occurrence is not measured again")
             self.assertEqual(warm["bbox"], cold["bbox"])
 
-            op_memo.clear()
+            bounds.clear()
             calls.clear()
             _h, moved, _s = build_tree_from_compound(bank(5), root_name="bank")
             self.assertEqual(len(calls), 0, "translation does not repeat surface extrema")
@@ -567,9 +581,10 @@ class TreeBounds(StoreCase):
 
     def test_rotation_changes_the_measured_box_without_changing_caller_placement(self) -> None:
         from build123d import Location
-        from cadgen._internal import component_package, op_memo
+        from cadgen._internal import component_package
+        from cadgen.store import bounds
 
-        op_memo.clear()
+        bounds.clear()
         part = self.nurbs_cylinder()
         real = component_package.optimal_box
         with mock.patch.object(component_package, "optimal_box", wraps=real) as measure:
@@ -584,7 +599,7 @@ class TreeBounds(StoreCase):
                 self.assertEqual(before, tuple(after.Value(row, column) for row in (1, 2, 3) for column in (1, 2, 3, 4)))
                 self.assert_bounds(actual, {"min": expected[:3], "max": expected[3:]})
             self.assertEqual(measure.call_count, 2)
-            op_memo.clear()
+            bounds.clear()
             again = Location((-123, 321, -20), (90, 0, 0)) * part
             component_package._bbox_from_shape(again)
             self.assertEqual(measure.call_count, 2, "rotation-specific bounds survive RAM eviction")

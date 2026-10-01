@@ -11,6 +11,12 @@ exits 1 when taken — because then the port was the ask. The printed URL (and t
 ``--json {url,port,action}`` line) is the contract; the port is an output of
 launch, never something the caller reasons about.
 
+A launch that STARTS a server is that server and stays in the foreground; a
+launch that reuses one prints and exits. ``--detach`` makes both return: the
+server runs in the background (its own session, output to a log beside its
+registry entry) and the launcher exits once it has announced itself — the
+spelling for agents and scripts, which wait for a command to finish.
+
 Also the instance manager: ``cadgen viewer list [--json]`` shows every running
 Viewer (identity-probed, stale entries reaped) and ``cadgen viewer stop --port
 <n>`` / ``--pid <n>`` terminates one. These live here rather than in a separate
@@ -48,6 +54,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -155,7 +162,7 @@ def _compact_json(payload) -> str:
 
 
 # argparse prefixes this with "usage: " itself.
-USAGE = """{prog} [--host HOST] [--port N | --ephemeral] [--new] [--json]
+USAGE = """{prog} [--host HOST] [--port N | --ephemeral] [--new] [--json] [--detach]
        {pad} [--dist DIR] [--api-only] [--no-registry]
        {prog} list [--json]
        {prog} stop (--port N | --pid N)"""
@@ -174,6 +181,7 @@ _HELP = {
     "ephemeral": "bind an OS-assigned port; never reuse, never register",
     "new": "start a fresh instance instead of reusing a live one",
     "json": "announce the instance as one JSON line on stdout",
+    "detach": "run the server in the background: print its URL, then return",
     "dist": "built client to serve (default: the bundled client; env CADGEN_VIEWER_DIST)",
     "api_only": "serve only /__cad and /__tess_cache (a dev server owns the client)",
     "no_registry": "do not record this instance for `list`/`stop`/reuse",
@@ -235,6 +243,7 @@ def build_parser(prog: str = DEFAULT_PROG) -> argparse.ArgumentParser:
     binding.add_argument("--ephemeral", action="store_true", help=_HELP["ephemeral"])
     parser.add_argument("--new", dest="fresh", action="store_true", help=_HELP["new"])
     parser.add_argument("--json", action="store_true", help=_HELP["json"])
+    parser.add_argument("--detach", action="store_true", help=_HELP["detach"])
     parser.add_argument("--dist", default="", metavar="DIR", help=_HELP["dist"])
     parser.add_argument("--api-only", dest="api_only", action="store_true", help=_HELP["api_only"])
     parser.add_argument("--no-registry", dest="no_registry", action="store_true", help=_HELP["no_registry"])
@@ -250,6 +259,7 @@ def parse_args(argv: list[str], *, prog: str = DEFAULT_PROG) -> dict:
         "port_explicit": namespace.port is not None,
         "dist": namespace.dist or "",
         "json": namespace.json,
+        "detach": namespace.detach,
         "fresh": namespace.fresh,
         # Additive flags, all three for dev (see the client's vite.config.mjs).
         "ephemeral": namespace.ephemeral,
@@ -389,6 +399,7 @@ def _format_entry(entry: dict) -> str:
         f"    {url}\n"
         f"    serving  {entry.get('root') or '?'}\n"
         f"    code     {entry.get('packageDir') or '?'}"
+        + (f"\n    log      {entry['log']}" if entry.get("log") else "")
     )
 
 
@@ -458,8 +469,11 @@ def stop_command(argv: list[str], *, prog: str = f"{DEFAULT_PROG} stop") -> int:
         if not registry.probe(target, 0.25):
             # Unregister from the CALLER side. On Windows os.kill(SIGTERM) maps
             # to TerminateProcess: no signal handler runs and no atexit fires,
-            # so this is the only thing that removes the entry.
+            # so this is the only thing that removes the entry. A stop that
+            # worked leaves nothing to diagnose, so the log goes with it; every
+            # other way out keeps it (registry.prune_logs).
             registry.unregister(target["pid"])
+            registry.remove_log(target)
             _out(f"Stopped CAD Viewer on port {target['port']} (pid {target['pid']}).\n")
             return 0
         time.sleep(0.1)
@@ -546,12 +560,176 @@ def main(argv: list[str] | None = None, *, prog: str = DEFAULT_PROG) -> int:
     return serve(argv, prog=prog)
 
 
+# --- detach --------------------------------------------------------------
+
+# How long a --detach launch waits for its server to announce itself. A launch
+# takes well under a second; this bounds a wedged child, not a normal one.
+DETACH_READY_TIMEOUT_SECONDS = 120.0
+_DETACH_POLL_SECONDS = 0.02
+
+
+def _announcement(line: str) -> dict | None:
+    """The ``{url,port,action}`` line, parsed, or ``None`` for any other line."""
+    if not line.startswith("{"):
+        return None
+    try:
+        payload = json.loads(line)
+    except ValueError:
+        return None
+    if isinstance(payload, dict) and {"url", "port", "action"} <= set(payload):
+        return payload
+    return None
+
+
+def _read_lines(path: str) -> list[str]:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read().splitlines()
+    except OSError:
+        return []
+
+
+def _remove(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass  # best-effort
+
+
+def _detached_log() -> str:
+    """The log a ``--detach`` launcher handed this server, or ``""``.
+
+    Taken from ``CADGEN_VIEWER_LOG`` only when this process's stdout really IS
+    that file: a variable inherited by accident must not let a foreground
+    server claim a log — which a clean ``stop`` then deletes — that is not its
+    own. A development restart keeps both, so it still names the same log.
+    """
+    path = os.environ.get(registry.LOG_ENV, "")
+    if not path:
+        return ""
+    try:
+        return path if os.path.samestat(os.fstat(1), os.stat(path)) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def launch_detached(argv: list[str], *, as_json: bool, prog: str = DEFAULT_PROG) -> int:
+    """``--detach``: start the same launch as a background process, relay its
+    announcement, and RETURN.
+
+    Without it the launcher that starts a server IS that server and stays in
+    the foreground until it is stopped — right for a person at a terminal and
+    for ``npm run dev``, wrong for an agent's shell, which waits for the
+    command to finish (and for ``… | tail -1``, which waits for an EOF that
+    never comes). With it, both outcomes behave alike: a reused instance and a
+    started one each print their lines and exit 0.
+
+    The child is the ordinary foreground launch — the same arguments minus
+    ``--detach``, plus ``--json`` — in its own session (its own process group
+    on Windows), so closing the terminal or the agent's shell does not take it
+    down. Its stdout and stderr go to a log file beside its registry entry,
+    never to a pipe: this process exits, and a server writing into a pipe
+    nobody reads would fail on its next line. The log is created here, under a
+    name that never changes (``registry.create_log``), and handed to the child
+    in ``CADGEN_VIEWER_LOG`` so its registry entry names it — whether or not
+    this launcher is still alive when the server comes up. It outlives the
+    server: a clean ``stop`` removes it, and a crash leaves it to read.
+    Readiness is the child's own announcement, which it writes only once it is
+    bound, attached and registered, so the URL printed here answers its first
+    request and ``list``/``stop``/reuse already see the instance. A launch that
+    does not end in a started server removes the log: its lines are relayed.
+    """
+    child_argv = [item for item in argv if item != "--detach"]
+    if "--json" not in child_argv:
+        child_argv.append("--json")
+    popen_options: dict = {}
+    if sys.platform.startswith("win"):
+        popen_options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_options["start_new_session"] = True
+    try:
+        descriptor, log_file = registry.create_log()
+    except OSError as error:
+        _err(f"CAD Viewer could not start in the background: {error}\n")
+        return 1
+    try:
+        with open(descriptor, "wb") as log:
+            child = subprocess.Popen(  # noqa: S603 - our own interpreter, our own module
+                [sys.executable, "-m", "cadgen.viewer", *child_argv],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+                env={**os.environ, registry.LOG_ENV: log_file},
+                **popen_options,
+            )
+    except OSError as error:
+        _remove(log_file)
+        _err(f"CAD Viewer could not start in the background: {error}\n")
+        return 1
+
+    deadline = time.monotonic() + DETACH_READY_TIMEOUT_SECONDS
+    announced = None
+    timed_out = False
+    while True:
+        exited = child.poll() is not None
+        lines = _read_lines(log_file)
+        announced = next((payload for payload in map(_announcement, lines) if payload), None)
+        if announced is not None or exited:
+            break
+        if time.monotonic() >= deadline:
+            child.kill()
+            child.wait()
+            timed_out = True
+            lines = _read_lines(log_file)
+            lines.append(f"(no announcement within {int(DETACH_READY_TIMEOUT_SECONDS)}s; stopped it)")
+            break
+        time.sleep(_DETACH_POLL_SECONDS)
+
+    if announced is None:
+        _remove(log_file)
+        for line in lines:
+            _err(f"{line}\n")
+        # The child's own refusal code (1, or 2 for its argument grammar) is
+        # the answer. A child this launcher killed, or one a signal took, has a
+        # negative status that would wrap to a meaningless exit (-9 -> 247).
+        code = child.returncode
+        return code if not timed_out and code is not None and code > 0 else 1
+
+    say = _err if as_json else _out
+    for line in lines:
+        if _announcement(line) is None:
+            say(f"{line}\n")
+    if announced.get("action") == "started":
+        say(
+            f"Running in the background (pid {child.pid}); its output goes to {log_file}. "
+            f"Stop it with `{prog} stop --port {announced['port']}`.\n"
+        )
+    else:
+        child.wait()
+        _remove(log_file)
+    if as_json:
+        _out(f"{_compact_json({key: announced[key] for key in ('url', 'port', 'action')})}\n")
+    return 0
+
+
 def serve(argv: list[str], *, prog: str = DEFAULT_PROG) -> int:
     _harden_streams()
     # argparse answers --help on stdout with exit 0 and refuses an unknown
     # argument with exit 2, both before anything below runs. A launcher that
     # answered --help by starting a server read as broken.
     args = parse_args(argv, prog=prog)
+
+    if args["detach"]:
+        if args["no_registry"]:
+            # A detached server has no terminal to Ctrl-C: `list` and `stop` are
+            # the only way anyone finds or ends it, and both read the registry.
+            _err(
+                f"{prog}: --detach cannot be combined with --no-registry: a detached "
+                f"Viewer is found and stopped through `{prog} list` / `{prog} stop`\n"
+            )
+            return 2
+        return launch_detached(argv, as_json=args["json"], prog=prog)
 
     try:
         directory = served_directory()
@@ -586,8 +764,11 @@ def serve(argv: list[str], *, prog: str = DEFAULT_PROG) -> int:
         held = find_reusable(directory, identity_token(dist_dir))
         if held:
             url = f"http://{held.get('host') or DEFAULT_VIEWER_HOST}:{held['port']}/"
-            _out(f"Reusing CAD Viewer at {url} (serving {held.get('root')}, pid {held['pid']})\n")
-            _out(f"CAD Viewer URL: {url}\n")
+            # The same stream rule as a start: under --json, stdout is the one
+            # JSON line in BOTH outcomes, so no reader needs "the last line".
+            say = _err if args["json"] else _out
+            say(f"Reusing CAD Viewer at {url} (serving {held.get('root')}, pid {held['pid']})\n")
+            say(f"CAD Viewer URL: {url}\n")
             if args["json"]:
                 _out(f"{_compact_json({'url': url, 'port': held['port'], 'action': 'reused'})}\n")
             return 0
@@ -627,6 +808,29 @@ def serve(argv: list[str], *, prog: str = DEFAULT_PROG) -> int:
     server.app = app
     server.RequestHandlerClass = make_handler_class(app)
 
+    # Register this instance so `list` and a later launch's reuse lookup can find
+    # it — after the bind, so we never advertise a port we failed to take, and
+    # BEFORE the URL line, so whoever reads that line (a --detach parent above
+    # all) can rely on `list`/`stop`/reuse seeing the instance it names. Dev
+    # skips it: a registered dev backend would be REUSED by a later real launch
+    # on the same root, handing an agent a URL served by Vite's proxy target.
+    if not args["no_registry"]:
+        # The token is the one the app computed AT ITS OWN START (CadApp
+        # holds it), never re-read from disk here: a re-read would let a
+        # stale resident claim freshness after a pull.
+        registry.register(
+            host=host,
+            port=port,
+            root=directory,
+            viewer_version=app.viewer_version,
+            token=app.identity_token,
+            log=_detached_log(),
+        )
+
+        import atexit  # noqa: PLC0415
+
+        atexit.register(registry.unregister)
+
     url = f"http://{host}:{port}/"
     started = "Starting CAD Viewer API" if args["api_only"] else "Starting CAD Viewer"
     # Like every other --json verb: stdout carries the one JSON line and nothing
@@ -638,25 +842,11 @@ def serve(argv: list[str], *, prog: str = DEFAULT_PROG) -> int:
     if args["json"]:
         _out(f"{_compact_json({'url': url, 'port': port, 'action': 'started'})}\n")
 
-    # Announce this instance so `main.py list` can find it — after the bind, so
-    # we never advertise a port we failed to take. Dev skips it: a registered
-    # dev backend would be REUSED by a later real launch on the same root,
-    # handing an agent a URL served by Vite's proxy target.
-    if not args["no_registry"]:
-        # The token is the one the app computed AT ITS OWN START (CadApp
-        # holds it), never re-read from disk here: a re-read would let a
-        # stale resident claim freshness after a pull.
-        registry.register(
-            host=host,
-            port=port,
-            root=directory,
-            viewer_version=app.viewer_version,
-            token=app.identity_token,
-        )
-
-        import atexit  # noqa: PLC0415
-
-        atexit.register(registry.unregister)
+    # List the served tree once in the background, so the first catalog request
+    # finds the scanner's directory listings warm instead of paying the cold
+    # walk while the browser waits. After the announcement, never before it:
+    # the URL line is the readiness signal and waits for nothing.
+    threading.Thread(target=app.backend.warm_listings, name="cadgen-viewer-warm", daemon=True).start()
 
     def shutdown(_signum=None, _frame=None):
         if not args["no_registry"]:

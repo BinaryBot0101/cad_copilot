@@ -2,11 +2,11 @@
 
 The published distribution: everything that turns CAD source into documents,
 documents into derived state, and derived state into pixels and meshes. One
-PyPI package carrying both language halves — the Python engine under
-`src/cadgen/`, and the built JavaScript it executes under
-`src/cadgen/_runtime/` (the shared JavaScript runtime and the CAD Viewer's client,
-bundled in at build time; the JS *source* lives in its own packages and never
-ships as source).
+PyPI package carrying the Python engine under `src/cadgen/` and what it executes
+that is not Python under `src/cadgen/_runtime/`: the shared JavaScript runtime and
+the CAD Viewer's client, bundled in at build time (the JS *source* lives in its own
+packages and never ships as source), and the native file tracer, one library per
+platform.
 
 **PURPOSE** — the engine and its command surface: model execution, the
 store, document assembly, kinematics, exports, validation, inspection,
@@ -15,7 +15,7 @@ snapshots, the warm daemon and its build pool, and the CAD Viewer
 instance).
 
 **MAY DEPEND ON** — the Python ecosystem it declares (OCP/build123d lazily,
-never at namespace-import time) and the bundled JavaScript runtime.
+never at namespace-import time) and the bundled runtime.
 Never app code, never JavaScript source at runtime.
 
 **DEPENDED ON BY** — every skill (as a pinned installed distribution). The
@@ -24,14 +24,13 @@ submits a document's compile as a job to the same build pool every door uses.
 
 ## The rest of the package's documentation
 
-This file holds the LAWS. Three documents beside it hold the mechanisms the
+This file holds the LAWS. Two documents beside it hold the mechanisms the
 laws constrain; a law that governs one links to it, and where a mechanism
 document and this one disagree, the mechanism document is right.
 
 | Document | What it is for | Go there when |
 |---|---|---|
 | [`STORE.md`](STORE.md) | The store's contract: layout, the two-sides law, tree/record shapes, the gate, invariants, link-vs-component, concurrency, GC, the daemon, lazy children, editing previews, debugging. Sectioned, with a table of contents | changing anything that writes to or reads from `~/.cache/cadgen`, or any build, door or reader that depends on it |
-| [`MEMO.md`](MEMO.md) | `@memo`: the author's purity contract, what declines reuse, and the three statements about process-wide geometric `Shape` identity while the decorator is installed | adding, using or diagnosing a memoized geometry factory — and before relying on `is_same`, `==` or `hash()` of a shape |
 | [`SNAPSHOTS.md`](SNAPSHOTS.md) | Snapshots: display presets, what a mesh, robot or drawing snapshot draws (the CAD Viewer's own scene for it), requests and OUT, sizes, and `--debug --json` — every measured browser stage, what each one covers, and which durations must not be added together | changing what a snapshot draws or accepts, or reading snapshot timings |
 
 ## The design laws
@@ -77,7 +76,7 @@ this one:
 
 `~/.cache/cadgen` is the store: content-addressed objects (a model's result
 tree and the components it is made of) and input-addressed index entries
-(the per-model record, the document → tree map, op-memo and tessellation
+(the per-model record, the document → tree map, bounds and tessellation
 entries) — data derivable from sources and documents, and nothing else. Its
 layout, formats, gate, two-sides law and invariants are the contract in
 [`STORE.md`](STORE.md); read it before touching anything that writes to or
@@ -124,12 +123,21 @@ A STEP or DXF is pure geometry. Provenance, kinematics, and context ride
 the sidecar; the artifact separated from everything else is a plain
 importable file.
 
-### 5. Byte determinism
+### 5. Byte determinism is the writers' promise, not the kernel's
 
-Same inputs, same bytes, every format — STEP (canonicalized NAUO ids and
-presentation-style ordering), meshes (one deterministic tessellator), DXF
-(geometry-ordered emitter). Content-addressing and every freshness ledger
-depend on it.
+cadgen's writers are pure: the same shapes give the same bytes, in every
+format — STEP (canonicalized NAUO ids and presentation-style ordering), meshes
+(one deterministic tessellator), DXF (geometry-ordered emitter). The geometry
+kernel makes no such promise. Two runs of one model can differ in a last digit
+or in the order of the pieces a boolean returns, and cadgen neither hides that
+nor depends on it. Equal bytes mean reuse; different bytes cost a
+recomputation (a re-mesh, a parent recompose) and never a wrong answer.
+Content addresses stay byte hashes; whether a model runs is decided by its
+sources (`STORE.md` §4), never by its outputs being reproducible. Compare two
+builds by geometry within a tolerance, never by file hash.
+*Pressure-test*: build one model twice, each from an empty store. If the bytes
+differ, nothing fails, and the second build's outputs are as correct as the
+first's.
 
 ### 6. One surface, three faces
 
@@ -150,10 +158,11 @@ tessellated as stored. One name, one validator, no synonyms.
 Geometry queries are a Python library surface, separate from document-format
 verbs. `read_step(path)` returns build123d geometry; `read_scene(path)` returns
 revision-scoped occurrence/selector views with caller-owned world geometry.
-`cadgen.geometry` provides `closest_points`, `overlap_volume`,
-`topology_errors`, `boundary_edges`, `self_intersections` and `mass_properties`.
-These operations accept native geometry and return facts; selection, units,
-thresholds, exclusions and verdicts belong to the caller's script. The inspect
+`cadgen.geometry` provides `closest_points`, `overlap_volume`, `is_sound`,
+`topology_errors`, `boundary_edges`, `self_intersections` and
+`mass_properties`. These operations accept native geometry and return facts;
+selection, units, thresholds, exclusions and verdicts belong to the caller's
+script. The inspect
 CLI and `step.inspect` are removed, with an immediate migration error.
 The contracts live in [`step_scene.py`](src/cadgen/step_scene.py) and
 [`geometry.py`](src/cadgen/geometry.py). They import no kernel at namespace
@@ -216,10 +225,18 @@ read source, a record, or trigger source builds (12). An explicit editing
 session may consume runtime-announced preview trees as specified in STORE §9b.
 Correctness never depends on a
 store hit (13). Composition: importing binds, calling links — a parent
-depends on a child by its RESULT (the pinned tree), on a constant by its
-VALUE, on a helper by its FILE — and a model must never `read_step` its own
-output (14). The bundled runtime under `_runtime/` is the JS half of these;
-the laws' JS statements live in that runtime. It is built
+depends on a child by its RESULT (the pinned tree) and on what importing it
+runs in the parent's process (its module body and model headers, never a
+model body), on a constant by its VALUE, on a helper by its REACH (the part of
+the helper the script and every file the build executed can run, closed
+statically; the whole file — or the whole closure — wherever the analysis
+cannot see), on a data file by its BYTES (every file the build opened,
+whoever opened it: STORE.md §5, every read is seen),
+and on every file whose appearance would change what an import finds
+([`STORE.md`](STORE.md) §3) — and a model must never `read_step` its own
+output (14). The bundled runtime
+under `_runtime/` is the JS half of these; the laws' JS statements live in that
+runtime. It is built
 when the wheel is packaged and travels only inside it: the source tree never
 carries a built copy, so an installed cadgen and the sources that produced it
 cannot disagree.
@@ -291,6 +308,24 @@ file it was asked for.
 materials, or animation; no
 `.step.json` may appear beside it.
 
+### 18. Caches sit around a model run, never inside it
+
+The gate decides whether a model runs at all (`STORE.md` §4), and the store
+derives everything render-side from the bytes the run wrote (law 2). Inside a
+run, every modeling operation executes: cadgen never replays a stored result,
+never substitutes a copy for what an operation returned, and never changes
+what build123d's `==` and `is_same` answer. A script therefore behaves the
+same inside cadgen as under plain Python. The hooks that remain change no
+result: `determinism.py` fixes the iteration order of build123d's
+de-duplications (an order-keeping set, and a `Vertex` hash by point that
+leaves equality alone), lazy children defer a child's geometry until it is
+read (`STORE.md` §9a), and the file trace only watches what the run opens
+(`STORE.md` §5). An expensive or independently edited part gets its
+speed by being its own model, never from a cache inside one.
+*Pressure-test*: call a model's function under plain Python and inside a
+cadgen build; the geometry it returns, and the answer to every `==` and
+`is_same` along the way, are the same.
+
 ## The shape of the package
 
 ```
@@ -304,10 +339,7 @@ src/cadgen/
                          #   writes no STEP
   kinematics.py          # typed mates vocabulary (revolute/slider/
                          #   cylindrical/fastened, couple, normalize)
-  step_scene.py          # read_step and scene loading (recorded inputs)
-  inputs.py              # declare_input: a data file the model reads and
-                         #   cadgen has no reader for (a JSON atlas, a CSV
-                         #   table) is a freshness input once it says so
+  step_scene.py          # read_step and read_scene
   assembly.py            # label utilities and softly deprecated AssemblyHelper
   results.py             # the typed Results every verb returns (stdlib-only)
   store/                 # the store (STORE.md): objects, index, records, trees,
@@ -319,6 +351,7 @@ src/cadgen/
                          #   spares, extras), jobs (the ledger), server,
                          #   worker, client, transport
   _internal/             # the engine: generation pipeline, tree builder,
+                         #   filetrace (every file a build opens),
                          #   FK (kinematics_fk/resolve), mesh_export ledger,
                          #   cli_from_function, doors (documents by bytes),
                          #   source_sidecar, step_assemble/step_reemit
@@ -328,8 +361,9 @@ src/cadgen/
                          #   compiled / failed), build_progress (the daemon's
                          #   job ledger, read over its socket)
   _runtime/              # BUILT JS (browser snapshot renderer, node
-                         #   builders, the viewer client) — produced when the
-                         #   wheel is packaged, never committed, never edited
+                         #   builders, the viewer client) and the native file
+                         #   tracer, one library per platform — produced when
+                         #   the wheel is packaged, never committed, never edited
 ```
 
 Verbs by format: `step` compile · build · snapshot;

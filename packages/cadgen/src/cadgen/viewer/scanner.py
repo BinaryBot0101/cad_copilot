@@ -37,12 +37,16 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 import re
 import stat as stat_module
 import threading
+import time
+from collections import OrderedDict
 
+from cadgen._internal.shared_read import open_shared_for_read
 
 from .content_types import extension_of
 from .encoding import encode_uri_component, encode_url_path, file_version
@@ -232,6 +236,12 @@ _STEP_ENTRY_CACHE_LOCK = threading.Lock()
 
 
 def _sha256_file(file_path, stat_result=None) -> str:
+    """The file's sha256, or ``""`` when it vanished (or became unreadable) mid-scan.
+
+    Opened with delete sharing: this runs on the catalog's background refresh,
+    and a user deleting the model meanwhile must win, on Windows too. A file gone by the time it is opened simply has no hash this scan; the
+    next request no longer lists it.
+    """
     st = stat_result if stat_result is not None else _file_stats(file_path)
     key = (str(file_path), st.st_size, st.st_mtime_ns) if st is not None else None
     if key is not None:
@@ -240,9 +250,12 @@ def _sha256_file(file_path, stat_result=None) -> str:
         if cached is not None:
             return cached
     digest = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    try:
+        with open_shared_for_read(file_path) as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
     hexdigest = digest.hexdigest()
     if key is not None:
         with _HASH_CACHE_LOCK:
@@ -357,31 +370,119 @@ def _node_decoded_name(name: str) -> str:
     return name
 
 
-def _collect_cad_source_files(root_path: str, result: list, visited=None, depth: int = 0) -> list:
-    if depth > SCAN_MAX_DEPTH:
-        return result
+# --- directory listing cache ----------------------------------------------
+#
+# The catalog is re-read on every poll (the client polls every 2s, and the
+# artifact status route reads it too), and a served root can hold a project's
+# scratch: hundreds of thousands of renders, BREPs and logs that are not
+# artifacts. Re-listing all of them per request made every request cost a full
+# walk. So each directory's RELEVANT rows — subdirectories the walk descends
+# into, symlinks, and CAD files — are memoised on that directory's own
+# identity, and a warm walk costs one stat per directory rather than one entry
+# per file.
+#
+# Adding, removing or renaming an entry moves its directory's mtime and ctime,
+# and a changed identity is a miss; a file's CONTENT is not a listing fact
+# (catalog rows fingerprint their own files). Symlinks are cached as links and
+# their targets are re-stated on every walk, because a target can change
+# without its link's directory changing. Where the stamps can fail to move,
+# three rules keep that from hiding a change for long:
+#
+# * Timestamp granularity. A change landing in the same clock tick as the
+#   listing leaves both stamps where they were, so a listing is trusted only
+#   once its directory's NEWER stamp is ``_LISTING_SETTLE_NS`` old when it is
+#   read (the "racy git" rule), covering 1s HFS+ and 2s FAT stamps. A directory
+#   being written right now is simply re-listed on every walk.
+# * Stamps that are not times. A macOS exFAT volume root reports mtime and
+#   ctime 0 and never moves either, and FAT cannot store a time before 1980. A
+#   directory with either stamp at or before ``_PLAUSIBLE_STAMP_NS`` is
+#   re-listed on every walk.
+# * Stamps put back. tar, unzip, rsync -a and cp -p restore a directory's mtime
+#   after filling it. Where ctime is real (APFS, HFS+, ext4) the kernel moves
+#   it anyway, but FAT and exFAT keep none (they report mtime as ctime) and
+#   Windows reports creation time in its place, so the identity can repeat
+#   exactly. Nothing on disk can catch that, so no listing is trusted for more
+#   than ``_LISTING_TTL_NS``: past that age a walk re-lists the directory
+#   whatever its stamps say. At the client's 2 s poll, 10 s keeps four polls in
+#   five warm (the fifth costs what every poll used to) and bounds how long such
+#   a change can stay out of the catalog.
+#
+# An untrusted listing is still recorded, never served: it is what tells the
+# next listing of that directory which subdirectories have since gone, and a
+# directory that has gone takes everything remembered beneath it along. The
+# memo is least-recently-walked-out-first beyond ``_LISTING_CACHE_LIMIT``.
+_LISTING_CACHE: OrderedDict[str, tuple] = OrderedDict()
+_LISTING_CACHE_LIMIT = 65536
+_LISTING_CACHE_LOCK = threading.Lock()
+_LISTING_SETTLE_NS = 2_000_000_000
+_LISTING_TTL_NS = 10_000_000_000
+# 1980-01-02T00:00:00Z: FAT's epoch is 1980-01-01 in LOCAL time, so a day's
+# margin covers it in every zone.
+_PLAUSIBLE_STAMP_NS = 315_619_200_000_000_000
+
+# The two clocks a listing is judged by, module attributes so a test can hold
+# them still: WALL time is compared with directory stamps (settling), MONOTONIC
+# time ages a remembered listing, so a wall-clock step can neither expire every
+# listing at once nor keep one forever.
+_wall_ns = time.time_ns
+_monotonic_ns = time.monotonic_ns
+
+_ROW_DIRECTORY = "d"
+_ROW_FILE = "f"
+_ROW_LINK = "l"
+
+
+def _listing_is_trustworthy(dir_stat, read_at_ns: int) -> bool:
+    """Whether a listing taken at wall time ``read_at_ns`` may be served again."""
+    stamps = (dir_stat.st_mtime_ns, dir_stat.st_ctime_ns)
+    return min(stamps) > _PLAUSIBLE_STAMP_NS and read_at_ns - max(stamps) >= _LISTING_SETTLE_NS
+
+
+def _forget_listings_locked(paths) -> None:
+    """Drop the listings of ``paths`` and of everything recorded beneath them.
+
+    One pass over the memo, so it runs only when a directory has gone. The
+    caller holds ``_LISTING_CACHE_LOCK``.
+    """
+    exact = set(paths)
+    if not exact:
+        return
+    prefixes = tuple(path + os.sep for path in exact)
+    for key in [key for key in _LISTING_CACHE if key in exact or key.startswith(prefixes)]:
+        del _LISTING_CACHE[key]
+
+
+def _listing_rows(dir_path: str) -> list | None:
+    """The sorted ``(name, kind)`` rows the walk acts on, or ``None`` if unreadable."""
     try:
-        real_root = os.path.realpath(root_path, strict=True)
+        dir_stat = os.stat(dir_path)
     except (OSError, ValueError):
-        return result
-    if visited is None:
-        visited = set()
-    if real_root in visited:
-        # An earlier-sorted alias of a directory therefore HIDES the real one.
-        # That is the flip side of the loop guard, not a separate rule.
-        return result
-    visited.add(real_root)
+        with _LISTING_CACHE_LOCK:
+            _forget_listings_locked((dir_path,))
+        return None
+    identity = (dir_stat.st_dev, dir_stat.st_ino, dir_stat.st_mtime_ns, dir_stat.st_ctime_ns)
+    now = _monotonic_ns()
+    with _LISTING_CACHE_LOCK:
+        cached = _LISTING_CACHE.get(dir_path)
+        if cached is not None:
+            recorded_identity, rows, listed_at, trusted = cached
+            if trusted and recorded_identity == identity and 0 <= now - listed_at < _LISTING_TTL_NS:
+                _LISTING_CACHE.move_to_end(dir_path)
+                return rows
+    read_at = _wall_ns()
     try:
-        with os.scandir(root_path) as scan:
+        with os.scandir(dir_path) as scan:
             # Node sorts the DECODED names, so decode first and sort on that.
             entries = sorted(
                 ((_node_decoded_name(entry.name), entry) for entry in scan),
                 key=lambda pair: _walk_sort_key(pair[0]),
             )
     except (OSError, ValueError):
-        return result
+        with _LISTING_CACHE_LOCK:
+            _LISTING_CACHE.pop(dir_path, None)
+        return None
+    rows = []
     for name, entry in entries:
-        entry_path = os.path.join(root_path, name)
         try:
             is_directory = entry.is_dir(follow_symlinks=False)
             is_file = entry.is_file(follow_symlinks=False)
@@ -389,21 +490,78 @@ def _collect_cad_source_files(root_path: str, result: list, visited=None, depth:
         except OSError:
             continue
         if is_symlink:
-            try:
-                target = os.stat(entry_path)
-            except (OSError, ValueError):
-                continue  # broken link
-            is_directory = stat_module.S_ISDIR(target.st_mode)
-            is_file = stat_module.S_ISREG(target.st_mode)
-        if is_directory:
+            if not is_hidden_name(name):
+                rows.append((name, _ROW_LINK))
+        elif is_directory:
+            if not _should_skip_directory(name):
+                rows.append((name, _ROW_DIRECTORY))
+        elif is_file and not is_hidden_name(name) and extension_of(name) in SOURCE_EXTENSIONS:
+            rows.append((name, _ROW_FILE))
+    trusted = _listing_is_trustworthy(dir_stat, read_at)
+    with _LISTING_CACHE_LOCK:
+        previous = _LISTING_CACHE.pop(dir_path, None)
+        if previous is not None:
+            # Every walk descends through what a listing names, so a
+            # subdirectory or link it no longer names is gone for good.
+            still_named = {name for name, kind in rows if kind != _ROW_FILE}
+            _forget_listings_locked(
+                os.path.join(dir_path, name)
+                for name, kind in previous[1]
+                if kind != _ROW_FILE and name not in still_named
+            )
+        _LISTING_CACHE[dir_path] = (identity, rows, now, trusted)
+        while len(_LISTING_CACHE) > _LISTING_CACHE_LIMIT:
+            _LISTING_CACHE.popitem(last=False)
+    return rows
+
+
+def _collect_cad_source_files(
+    root_path: str, result: list, visited=None, depth: int = 0, real_root: str | None = None
+) -> list:
+    """Every CAD file under ``root_path``, in walk order.
+
+    ``real_root`` is the caller's already-resolved real path of ``root_path``.
+    It is passed only for a plain (non-link) subdirectory on POSIX, where it is
+    exactly ``realpath(parent)/name``; everywhere else (the root, a symlink,
+    Windows with its junctions) the path is resolved here.
+    """
+    if depth > SCAN_MAX_DEPTH:
+        return result
+    if real_root is None:
+        try:
+            real_root = os.path.realpath(root_path, strict=True)
+        except (OSError, ValueError):
+            return result
+    if visited is None:
+        visited = set()
+    if real_root in visited:
+        # An earlier-sorted alias of a directory therefore HIDES the real one.
+        # That is the flip side of the loop guard, not a separate rule.
+        return result
+    visited.add(real_root)
+    rows = _listing_rows(root_path)
+    if rows is None:
+        return result
+    for name, kind in rows:
+        entry_path = os.path.join(root_path, name)
+        if kind == _ROW_DIRECTORY:
+            _collect_cad_source_files(
+                entry_path, result, visited, depth + 1,
+                real_root=os.path.join(real_root, name) if os.name != "nt" else None,
+            )
+            continue
+        if kind == _ROW_FILE:
+            result.append(entry_path)
+            continue
+        try:
+            target = os.stat(entry_path)
+        except (OSError, ValueError):
+            continue  # broken link
+        if stat_module.S_ISDIR(target.st_mode):
             if not _should_skip_directory(name):
                 _collect_cad_source_files(entry_path, result, visited, depth + 1)
             continue
-        if not is_file:
-            continue
-        if is_hidden_name(name):
-            continue
-        if extension_of(name) in SOURCE_EXTENSIONS:
+        if stat_module.S_ISREG(target.st_mode) and extension_of(name) in SOURCE_EXTENSIONS:
             result.append(entry_path)
     return result
 
@@ -430,7 +588,9 @@ def _xml_root_name(file_path, expected_tag: str = "robot") -> str | None:
     URDF carrying the same mojibake still pair.
     """
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        with io.TextIOWrapper(
+            open_shared_for_read(file_path), encoding="utf-8", errors="replace"
+        ) as handle:
             text = handle.read()
     except (OSError, ValueError):
         return None
@@ -549,7 +709,9 @@ def step_kind_from_topology(topology) -> str:
 def _read_json(file_path):
     """``JSON.parse(readFileSync(...))`` with every failure folded to ``None``."""
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as handle:
+        with io.TextIOWrapper(
+            open_shared_for_read(file_path), encoding="utf-8", errors="replace"
+        ) as handle:
             return json.load(handle)
     except (OSError, ValueError):
         return None

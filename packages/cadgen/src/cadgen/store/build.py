@@ -162,7 +162,7 @@ def build_tree_from_compound(
 
 
 def _document_walk(
-    scene: Any, *, progress: Any,
+    scene: Any, *, progress: Any, force: bool = False,
 ) -> tuple[_Walk, Any, dict[str, list[str]], dict[str, str]]:
     """Walk parsed STEP products, with no filename or authored-result input.
 
@@ -170,16 +170,20 @@ def _document_walk(
     acquiring another grouping from a reconstructed Python wrapper. Canonical
     IDs follow product order; the maps relate the parser's paths to their
     canonical node and descendant leaf IDs, including synthetic wrapping when
-    a STEP has several free roots.
+    a STEP has several free roots. A prototype whose exact encoded bytes are
+    already published under the same native entry is not decoded again
+    (``prepare_published_component``); a forced build derives every one.
     """
     from build123d import Compound
 
     from cadgen._internal.component_package import (
-        _build123d_shape_from_topods, _component_id, prepare_geometry_component, _normalized_face_colors,
+        _build123d_shape_from_topods, _component_id, prepare_geometry_component,
+        prepare_published_component, _normalized_face_colors,
     )
     from cadgen._internal.step_scene_loader import _selector_id
     from cadgen._internal.step_scene_mesh import _face_colors_by_ordinal, scene_occurrence_shape
 
+    prepare = prepare_geometry_component if force else prepare_published_component
     walk = _Walk()
     prototype_cids: dict[Any, str] = {}
     occurrence_map: dict[str, list[str]] = {}
@@ -213,7 +217,7 @@ def _document_walk(
             face_colors = _normalized_face_colors(
                 _face_colors_by_ordinal(prototype, raw_colors) if raw_colors else None
             )
-            prepared = prepare_geometry_component(prototype, face_colors=face_colors)
+            prepared = prepare(prototype, face_colors=face_colors)
             content_hash = prepared["entry"]["contentHash"]
             cid = _component_id(content_hash)
             prototype_cids[key] = cid
@@ -269,7 +273,7 @@ def _publish_document_scene(
         STEP_EDGE_DEFAULT_RENDER_VISIBILITY_CLASSES, step_topology_capabilities,
     )
 
-    walk, artifact, occurrence_map, node_map = _document_walk(scene, progress=progress)
+    walk, artifact, occurrence_map, node_map = _document_walk(scene, progress=progress, force=force)
     digest, tree, stats = _publish_tree(
         walk, bbox_shape=artifact, root_name=walk.root["name"], force=force, progress=progress,
         extra={"capabilities": step_topology_capabilities(),
@@ -627,7 +631,7 @@ def _publish_tree(
     return tree_hash, tree, stats
 
 
-_PREPARED_OCCURRENCE_BOUNDS_OP = "component_bbox.canonical_native_rotation.algorithm1"
+_PREPARED_OCCURRENCE_BOUNDS_ALGORITHM = "component_bbox.canonical_native_rotation.algorithm1"
 
 
 def _bbox_from_prepared_occurrences(walk: _Walk) -> dict[str, list[float]] | None:
@@ -636,7 +640,7 @@ def _bbox_from_prepared_occurrences(walk: _Walk) -> dict[str, list[float]] | Non
     ``_document_walk`` already owns one privately decoded shape per canonical
     component and the exact native location of each parsed STEP occurrence.
     Use the component's verified BREP identity, native-leaf ordinal and exact
-    leaf rotation as the memo input, measure that leaf tightly on a miss, and
+    leaf rotation as the ``cadgen.store.bounds`` key, measure that leaf tightly on a miss, and
     apply only its removed final translation. No transformed local AABB is used.
 
     Any incomplete private input falls back to the ordinary composed-shape
@@ -647,8 +651,8 @@ def _bbox_from_prepared_occurrences(walk: _Walk) -> dict[str, list[float]] | Non
         from OCP.TopLoc import TopLoc_Location
         from OCP.gp import gp_Vec
 
-        from cadgen._internal import op_memo
         from cadgen._internal.component_package import _world_leaves, optimal_box
+        from cadgen.store.bounds import cached_box
 
         boxes: list[list[float]] = []
         for occurrence in walk.occurrences:
@@ -670,8 +674,8 @@ def _bbox_from_prepared_occurrences(walk: _Walk) -> dict[str, list[float]] | Non
                                for row in range(1, 4) for column in range(1, 5))
                 untranslated = leaf.Located(TopLoc_Location(transform))
 
-                box = op_memo.memoized_value(
-                    _PREPARED_OCCURRENCE_BOUNDS_OP,
+                box = cached_box(
+                    _PREPARED_OCCURRENCE_BOUNDS_ALGORITHM,
                     (str(entry["codec"]), str(entry["brep"]), leaf_ordinal,
                      struct.pack("<12d", *linear)),
                     lambda untranslated=untranslated: optimal_box(untranslated),
@@ -1014,12 +1018,20 @@ def build_tree_through_step(
     with timed(f"tree: assemble STEP {step_path.name}"):
         step_path.parent.mkdir(parents=True, exist_ok=True)
         step_hash = export_build123d_step_file(document, step_path, logger=logger)
+    # The private document has done its work once the STEP is written: the
+    # read-back below parses the file and never consults it. Release it (and
+    # the prototypes the bounded path validated) before the parse, so a large
+    # assembly does not hold two complete native copies of its geometry at the
+    # peak of its build. Own shapes stay owned by ``walk`` for the read-back's
+    # face-colour checks.
+    document = None
+    prepared_document = None
 
     with timed(f"tree: re-read STEP {step_path.name}"):
         readback, damaged_document = (None, False) if force else _lookup_document_readback(step_path, step_hash=step_hash)
         scene = readback.scene if readback is not None else None
         if scene is None:
-            scene = load_step_scene(step_path, record_read=False)
+            scene = load_step_scene(step_path)
     nodes: dict[str, Any] = {}
     stack = list(scene.roots)
     while stack:

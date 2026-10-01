@@ -40,8 +40,8 @@ classifiers = [
 # OCC refuses -- but a fallback that is not installed is not a fallback.
 dependencies = [
   # Bounded above on purpose. cadgen does not merely CALL build123d, it
-  # reaches into it: the op memo replaces `Shape.is_same`/`__eq__`/`__hash__`
-  # and the topology-layer op entry points, and the lazy store replaces
+  # reaches into it: the determinism shim shadows `set` in three topology
+  # modules and replaces `Vertex.__hash__`, and the lazy store replaces
   # `Compound.__init__` and reads its arguments BY POSITION. A minor release
   # is free to reorder that signature or rename those choke points, and the
   # failure mode is silent: a patch that no longer matches simply stops
@@ -84,9 +84,10 @@ include = ["cadgen*"]
 
 [tool.setuptools.package-data]
 # _runtime holds everything cadgen executes that is not Python: the esbuilt Node
-# builders, the headless browser bundle the snapshot CLI drives, and the CAD Viewer's
-# built client that `cadgen viewer` serves. It is data, not a subpackage (no
-# __init__), and it is found at call time by cadgen.assets.
+# builders, the headless browser bundle the snapshot CLI drives, the CAD Viewer's
+# built client that `cadgen viewer` serves, and the file tracer every build loads
+# (one library per platform). It is data, not a subpackage (no __init__), and it is
+# found at call time by cadgen.assets and cadgen._internal.filetrace.
 # Verified by scripts/release/check-wheel-contents.sh.
 cadgen = ["py.typed", "*.pyi", "_runtime/**/*"]
 # The viewer server's catalog ordering is ICU root collation, read from this table at

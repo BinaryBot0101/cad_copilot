@@ -22,7 +22,6 @@ right.
 | [9](#9-the-daemon) | The build pool, job ledger and slots | daemon, workers, jobs |
 | [9a](#9a-lazy-children) | Lazy children: pins at the call, forcing, exact-`Compound` reference preservation | a decorated call's return, parallel child builds |
 | [9b](#9b-editing-previews-and-explicit-saves) | Announced preview trees, the feed, explicit saves | the viewer's live-edit path |
-| [9c](#9c-pure-parameterized-features) | `@memo`'s store side (author contract: [`MEMO.md`](MEMO.md)) | operation reuse |
 | [10](#10-debugging) | `store why`, resolving a tree, resets smallest first | diagnosing staleness |
 | [11](#11-never) | The explicit prohibitions | before proposing any of them |
 
@@ -42,21 +41,16 @@ One word per concept; the code uses these words and no others.
 | **link** | a tree entry pointing at a child's tree hash, with placement and name |
 | **pin** | the child tree hash a parent resolved during a build (noun and verb) |
 | **record** | the mutable per-model entry in `index/`: current tree hash, closure, children pins, outputs |
-| **index** | the input-addressed side of the store: records, op-memo entries, mesh entries |
-| **op memo** | the per-kernel-operation cache (always two words) |
-| **closure** | the source files a model's build read |
+| **index** | the input-addressed side of the store: records, bounds, mesh entries |
+| **closure** | what a model's build depended on: the source it reaches, the files it read, the folders it listed, and the files its imports rely on not existing |
 | **stale / current**, **gate** | the freshness state and the check that decides it |
 | **worker / spare / extra**, **job** | daemon vocabulary (the daemon's own documentation) |
 
 Retired words: node, package, manifest, ref (as a store concept), scope, blob.
 They name nothing in the store, in its code or in its documentation.
 
-Two words are NOT retired, and each has exactly one meaning:
+One word is NOT retired, and it has exactly one meaning:
 
-- **op memo** — the per-operation cache above, always two words. `@memo` is
-  its one author-facing surface: the decorator's contract is
-  [`MEMO.md`](MEMO.md) and its store side is [§9c](#9c-pure-parameterized-features).
-  A bare "memo" for any other cache is still wrong.
 - **descriptor** — a render/export-side word: the owned descriptor an
   appearance is applied to (README law 17), and the bounded pinned-link
   descriptors of [§9a](#9a-lazy-children). It is never a synonym for a tree,
@@ -72,7 +66,7 @@ Two words are NOT retired, and each has exactly one meaning:
   index/output/<sha256(output path)>  {model}: which script wrote the file at this path
   index/component/<cid>               geometry-input entries → encoded BREP and intrinsic recipe
   index/surface/<surfaceInput>        attested extraction inputs → SURF object hash
-  index/op/<sha256(op key)>           op-memo entries → object hash, or an inline value
+  index/bounds/<sha256(bounds key)>   bounding boxes of stored geometry, inline
   index/mesh/<key>                    tessellation entries → object hash
   index/drawing/<sha256(scheme + document hash)>  a 2D drawing's render payload → object hash
 ```
@@ -82,19 +76,21 @@ content: the daemon's job ledger, read over its socket (§7, §9). Editing
 previews use the same immutable objects, with ephemeral request handles in
 that ledger (§9b); there is no preview directory or persistent session index.
 
-Operation-index keys include the operation scheme, build123d version, loaded
-OCP binding version and cadquery-ocp-novtk provider distribution version.
-Unknown runtime versions disable persistent op reuse; normal computation remains available.
-These are input-index compatibility fields, never tree/component content or
-salts on document-byte keys. Computed results and disk hits share the same
-process LRU limit; dropping a RAM entry does not delete its persistent entry or
-invalidate a consumer's private geometry.
+`index/bounds` holds bounding boxes of stored geometry (`store/bounds.py`).
+A key names what was measured and how: a component's BREP object hash or a
+leaf's BinTools digest, the placement it is measured in, the measuring
+algorithm, and the loaded kernel's versions (build123d, OCP and its
+distribution); the value is six numbers, inline. A box is a pure function of
+that key, so a hit can never differ from a measurement, and an unknown kernel
+build just measures. Nothing in the index holds a value
+computed while a model runs (README law 18): a model's own checks and
+operations always execute.
 
 ### The two sides of the store — a law
 
 `objects/` is the **artifact side**: what geometry exists. `index/model`,
 `index/output` are the **code side**: what source produced a result and
-what it depended on. `index/op`, `index/component`, `index/surface`,
+what it depended on. `index/bounds`, `index/component`, `index/surface`,
 `index/mesh` and `index/drawing` remember reusable derivations; surface, mesh
 and drawing jobs consume only immutable artifact inputs. `index/drawing` is a
 2D document's flattened render payload: its key hashes the extraction scheme
@@ -154,7 +150,7 @@ the store makes:
   the entire verified required closure before publication. Display readiness
   is separate and disposable. A repair may restore bytes at their exact hash.
 - **Input-addressed** (`index/`): the name is derived from what PRODUCED the
-  entry (a script path, a kernel operation's inputs, a surface × tolerance),
+  entry (a script path, measured bytes and their placement, a surface × tolerance),
   and the entry is a small JSON file pointing at objects or recording facts.
   Entries are mutable and written temp + rename.
 
@@ -259,6 +255,12 @@ identity. A real one (`link_arm`: a bar plus two placements of a pin model):
   `eagerSurface` in its geometry identity. Native access raises
   `NativeUnavailable`; a saved-file reader may privately reparse its exact
   selected STEP bytes. Authored child pins never substitute a saved document.
+  A saved-document read-back skips that private decode for a parsed prototype
+  whose exact bintools-v4 bytes already exist as an object under a component
+  entry declaring the same native recipe: the fence was proven for those bytes
+  by the build that published them, and the parsed prototype — private to its
+  parse, measured but never meshed — stands in as the prepared native input.
+  A forced build derives and fences every component again.
 
   `store.surfaces.request_view` captures a runtime producer separately from the
   tree. The producer contains extraction scheme19, SURF format2 and the actual
@@ -321,9 +323,10 @@ identity. A real one (`link_arm`: a bar plus two placements of a pin model):
   geometry while retaining their own finishes. Appearance-sensitive exports
   include the normalized appearance digest in their variant, including absence.
 
-  Model records use payload schema7. Earlier records are misses: the next
-  source run rebuilds outputs whose input hashes may have been captured after
-  a mid-build edit, as well as outputs predating distinct occurrence colours.
+  Model records use payload schema 8 (reach slices, import-time slices, absent,
+  roots and listing entries). Earlier records are misses: the next source run
+  rebuilds outputs whose input hashes may have been captured after a mid-build
+  edit, as well as outputs predating distinct occurrence colours.
   This is one source rebuild; existing geometry and surface objects remain reusable.
   Document mappings remain payload schema4: saved bytes stay
   authoritative and are reparsed without guessing colours that the document
@@ -357,7 +360,7 @@ A real one (`link_robot`: a base, two placements of `link_arm`, one of
 ```json
 {
   "kind": "record",
-  "schemaVersion": 7,
+  "schemaVersion": 8,
   "model": "/abs/models/assemblies/src/link_robot/link_robot.py::link_robot",
   "script": "/abs/models/assemblies/src/link_robot/link_robot.py",
   "function": "link_robot",
@@ -365,7 +368,7 @@ A real one (`link_robot`: a base, two placements of `link_arm`, one of
   "sourceKind": "python",
   "tree": "64429167…",
   "documentTree": "b291420a…",
-  "closure": {"hash": "e341ac84…", "files": ["/abs/models/assemblies/src/link_robot/link_robot.py"], "static": false},
+  "closure": {"hash": "e341ac84…", "files": ["link_robot.py", "lib/frame.py"], "shas": {"link_robot.py": "ast1:…", "lib/frame.py": "slice4:…"}, "names": {"lib/frame.py": ["WIDTH", "bar"]}, "wholes": {"lib/frame.py": "ast1:…"}, "static": false},
   "children": [
     {"model": "/abs/models/assemblies/src/link_robot/link_arm.py::link_arm", "tree": "c161092b…"},
     {"model": "/abs/models/assemblies/src/link_robot/link_pin.py::link_pin", "tree": "265aee57…"}
@@ -379,10 +382,26 @@ A real one (`link_robot`: a base, two placements of `link_arm`, one of
   entered during the body appends `(model, pinned tree)`, whether that child
   ended up linked, inlined, modified or discarded. It is never derived from
   links.
-- `closure.files` is the model's static import closure (AST, transitive,
+- `closure.files` is the model's static reach (AST, transitive,
   first-party, absolute and relative imports alike — a `lib/` package's
-  `from .chain import X` counts) **stopping at model files**, plus files executed in its own
-  frame and discovered inputs (`read_step` documents). The animation module
+  `from .chain import X` counts, and importing `lib.x` executes
+  `lib/__init__.py`, so the package is in it) **stopping at model files**, plus files executed in its own
+  frame, what importing its children ran in its process (below), and every
+  data file the build read, whoever opened it -- Python's `open`, numpy, an
+  OCCT reader in C++ (§5, every read is seen). Nothing is declared. A file
+  read is not an input when the build wrote it, when it is one of the model's
+  own outputs, when it is code (Python source is the reach above; a compiled
+  library is the environment's), or when it lies in the environment: the
+  interpreter and its packages, cadgen, the store, and the folders the
+  operating system owns (fonts, time zones). Three kinds of entry are not files: `<folder>/`, a folder
+  the model's code listed (a glob of profiles), hashed by its sorted entry
+  names; `!<path>`, a file that
+  must stay absent — one the imports were resolved past (a package beside a
+  module, an `__init__.py` a namespace package lacks, a module an earlier
+  search root lacks) and would resolve to if it appeared — hashed `absent`;
+  and `<import roots N>`, the digest of the first N search roots when an
+  import was found past the script's own folder (a root added before those
+  could shadow it). The animation module
   declared by `@step(animation=...)` is source annotation;
   it is embedded in the unified sidecar and never enters geometry identity. The
   boundary is decided statically by what the importer TAKES from a model
@@ -393,10 +412,140 @@ A real one (`link_robot`: a base, two placements of `link_arm`, one of
   lists/dicts of those) → a value edge, file excluded, the value tracked in
   `constants`; anything else (a helper function, a `bd.` object, an
   expression) → a source edge, file included. **Constants by value,
-  functions by file, models by result.** Hit and miss runs record identical
+  functions by reach, models by result.** Hit and miss runs record identical
   closures by construction. `closure.static: true` marks a record whose
   inputs are not files (a document re-emitted by `cadgen step build`); the
   gate's clause 2 does not re-hash files for it.
+- **Functions by reach** (`cadgen.store.reach`, the walk in
+  `cadgen.store.closure`): a non-model file in the closure is hashed by the
+  part of it the model can execute, not by its whole text, so editing a helper
+  the model never reaches leaves it current. The record keeps the reached
+  names per sliced file in `closure.names` and the file's whole-file hash, of
+  the same bytes, in `closure.wholes`; a file absent from `names` (the script
+  itself, a model file taken as source, a data file the build read, a file
+  the fallbacks below made whole) is hashed whole as before. What a slice is, by
+  construction:
+  - A statement is an optional **definition** only inside a closed grammar:
+    an undecorated function with no type parameters and with defaults and
+    annotations consisting of closed literals; or a single-name
+    assignment of closed literals. Closed literals contain only constants,
+    literal containers without unpacking, and signed numeric constants. A
+    repeated binding is never optional: replacing an object can run its
+    finalizer. Function defaults/annotations referring to an object can also
+    change its lifetime, so bare names there are not optional — unless
+    annotations are never evaluated at definition time (`from __future__
+    import annotations`, Python 3.14+): then annotations do not count, and a
+    single-name annotated assignment of a closed literal is a definition too.
+    Everything else is **preamble**, always hashed with its reads reached.
+    This includes every class, decorator, call, evaluated annotation,
+    augmented assignment, alias assignment, unpacking, property/subscript read,
+    operator and formatted string. Neither a familiar module name nor the
+    absence of a call node proves purity: Python protocols can execute user
+    code implicitly. Unknown syntax defaults to preamble. This deliberately
+    trades some cache hits for correct invalidation, while ordinary unused
+    helper bodies and literal constants remain sliced by reach.
+    An unshadowed `if __name__ == "__main__":` block never runs on import: it
+    is in no slice, binds and rebinds nothing, and nothing in it makes its
+    file dynamic (the script itself is always hashed whole, block included).
+  - A **function edge** brings in that function's own source plus everything
+    it can reach: every name its body, decorators, defaults and annotations
+    load (also inside nested functions, lambdas and comprehensions, and names
+    it declares `global`), each resolved to the definitions binding it in the
+    same module — transitively — or, through an import binding, to a name in
+    another project module, where the same rule continues. A name a
+    function writes through `global` is bound by that function. A class edge
+    brings in the whole class. A module-scope import executes its module's
+    preamble, and every package on the way (`import a.b.c` executes `a`,
+    `a.b` and `a.b.c`); a from-import of a name reaches that name whether or
+    not it is used. Attribute chains on a module alias (`geo.plane`,
+    `lib.geo.plane`) walk submodules and end on a name; a submodule name that
+    the package's `__init__.py` also binds reaches that binding too (it wins
+    at run time unless the submodule was imported first).
+  - **Every file the build executed is a root.** The walk starts at the
+    script and then, walked whole from the bytes that ran, at every
+    first-party file the build executed that static reach never saw and no
+    child owns — a plugin imported for its side effect, a module found through
+    a `sys.path` insert — so what IT calls in a sliced file is in that slice.
+  - **What importing a child runs is this model's input.** A child's model
+    BODY never runs in this process — it runs in the child's own build, or not
+    at all — so it is tracked by the pin (models by result). But importing the
+    child runs its module body, the module bodies of the helpers it imports,
+    and its model definitions' **headers** (decorators, defaults, annotations)
+    here, and any of them can change what this body computes (a registry
+    filled, a shared table patched). Each such file is in the closure by what
+    its import runs: a child model file as an `islice1:` import slice (its
+    preamble, each model definition counted by its header, never its body; a
+    cadgen model decorator's literal arguments read as one placeholder, since
+    evaluating a literal runs nothing), a helper only children import as a
+    slice of what import-time code reaches, and whole when that is dynamic or
+    the closure reflective. An import-time walk follows what import-time code
+    reads; binding a name by `from x import y` runs none of `y`. What that
+    code reaches in a file this closure shares is reached too.
+  - **A pin is only a call.** A model function taken from a model file is a
+    result edge only while the importer calls it: an attribute of it
+    (`arm.__wrapped__`, `arm.__cadgen_model__`) can reach its body, so the file
+    is taken as source; and a model's wrapper carries no `__wrapped__`. A
+    `@dxf` function is not a pin at all: called inside another build it runs
+    its body inline, so taking one is taking source.
+  - **Anything dynamic falls back to whole files.** Per module, and the walk
+    then descends into all of it: a star import (importer and target whole);
+    `globals()`, `locals()` or a bare `vars()` (the module, and every module
+    it imports: its module objects expose every name of theirs); a
+    module-level `__getattr__`/`__dir__`; a module-scope read of a name nothing
+    binds and no builtin answers; a name reached in a module that has no
+    binding for it. A module alias used bare — `getattr(geo, name)`,
+    `vars(geo)`, `geo.__dict__`, `geo` passed along — makes the target whole,
+    and every module bound in it; a package alias used bare makes every file
+    of that package whole; an attribute write or delete on a module alias
+    (`geo.X = 1`, a monkeypatch) makes the target and the writer whole. Per
+    closure: when any walked file can reach an arbitrary module's namespace
+    by string or introspection — `exec`, `eval`, `compile`, `__import__`,
+    `__builtins__`; any binding from `importlib`, `builtins`, `runpy`,
+    `pkgutil`, `inspect`, `pydoc`, `gc`, `ctypes`, `pickle` and its kin, or
+    another module that resolves names from strings; `sys.modules` or a frame
+    through any alias of `sys` or `from sys import`; `__globals__`,
+    `f_globals`/`f_locals`/`f_back` or any other frame attribute — every
+    file of the closure is hashed whole and `names` is empty. The reach
+    through model files is unchanged: a result or value edge stops there; a
+    source edge into a model file takes it whole.
+  - **Module-level side effects keep file-level tracking**: they are
+    preamble, always hashed, their reads always reached — a constant table
+    built by a call, a registry filled at import, a conditional definition.
+  - **Static and deterministic.** The walk reads the bytes the exec hook
+    captured when each module ran (§5, hash at execution) and resolves
+    imports against the script's `sys.path` (its folder, then `PYTHONPATH`);
+    its only run-time input is which first-party files executed, and those
+    are in the closure either way. The gate never re-derives cross-module
+    reach: a sliced file whose whole-file hash is still its `closure.wholes`
+    keeps its recorded slice without being analysed, and one that moved is
+    re-sliced on disk by its recorded names
+    (`cadgen.store.closure.sliced_source_hash`: the names closed within the
+    module, each marked bound or unbound, then the preamble and the reached
+    definitions in source order, a digest of `ast.dump` per statement, so
+    comments and formatting do not count). Any edit that would change what
+    the walk reaches — a reached body calling something new, a new binding
+    shadowing a name, an import added or changed — also changes a hashed
+    statement or marker. A sliced file that turns dynamic hashes whole
+    (`ast1:` against a recorded `slice4:`) and reads stale. `cadgen store
+    why` prints a sliced file as `lib/geo.py[plane, cyl_along, …]`.
+  - **Lexical scopes decide what must be bound.** The analysis resolves every
+    load with Python's scoping rules, in one pass per module: parameters and
+    assignments belong to their function, a comprehension's targets to the
+    comprehension, defaults, decorators, bases and a comprehension's first
+    iterable to the enclosing scope, and a class body is invisible to every
+    scope nested in it (a class-body comprehension reads the module's name).
+    That resolution decides which names must be bound at module scope (the
+    unresolved-name fallback). As edges, every name a statement loads is
+    followed whatever scope binds it, so reach never rests on scoping alone;
+    the only cost is reaching a definition whose name a local shares. Import
+    aliases retain all candidate bindings across those scopes, so two nested
+    imports named `dims` cannot hide one another. A submodule name taken
+    through its package (`from lib import geo`) is part of the package
+    `__init__.py`'s slice even while the `__init__.py` does not bind it,
+    marked unbound, because a binding added there later wins over the
+    submodule. Which files declare models is read from their bytes, never
+    cached by path, so a warm process sees a decorator added or removed.
+    A sliced file's hash starts `slice4:`, a whole file's `ast1:`.
 - `constants` is `{"<model file, relative to the script>": {"<NAME>":
   "<sha256 of the literal's canonical repr>"}}` — every literal the model
   took from a model file by value. Empty for most models. The gate's clause
@@ -447,7 +596,14 @@ of:
 2. **`sha256(closure.files as they are now) != closure.hash`, or a constant
    in `constants` no longer hashes to its recorded value.** Protects against
    a source edit; the hash is a semantic hash of each file's Python
-   (comments and formatting do not count), computed at execution time (§5).
+   (comments and formatting do not count), computed at execution time (§5) —
+   over the whole file for the script and every file `closure.names` does not
+   list, over the reached slice for a file it does (§3, functions by reach):
+   editing a helper the model never reaches leaves it current; editing one it
+   reaches, directly or through other helpers, or a module-level name a
+   reached helper reads, makes it stale. A sliced file still at its recorded
+   whole-file hash (`closure.wholes`) keeps its recorded slice unanalysed, so
+   an unchanged project costs the gate the whole-file hashes and nothing more.
    A literal imported from a model file is compared as a value: a comment,
    a body edit or a new helper in that file leaves the importer current; a
    changed value (or the name no longer bound to a literal) makes it stale.
@@ -466,7 +622,7 @@ tolerance for that run (flag > declaration > `@step` > default): each mesh's
 ledger entry records the pair the file was written at, so the declared meshes
 are re-cut from the current tree — the model is never rebuilt for it — and the
 next run without the flags restores them, once. Imported STEPs are inputs (a
-`read_step` file is in the closure), not models. `--force` rebuilds the named
+file the body reads is in the closure), not models. `--force` rebuilds the named
 model only; its children go through the gate as usual. `cadgen store forget
 <model.py>` drops the record instead, so the next run — not this one — rebuilds
 it (§10, Resets).
@@ -481,12 +637,34 @@ Each with the failure it prevents.
   hash of the exact buffer it compiled before executing it, so a replacement
   during module loading cannot substitute a later file's identity. Prevents: a file
   edited during a long build being recorded with the bytes that did NOT run,
-  which would make a stale result read as current forever.
-  Declared data inputs retain their first declaration-time hash for both STEP
-  and DXF builds; an edit later in the body therefore leaves the result stale.
-  Since `declare_input` returns a path for the author's own reader, the author
-  must keep the file stable between declaration and that read. CAD readers
-  that own their input bytes record the exact consumed digest instead.
+  which would make a stale result read as current forever. A first-party
+  module is compiled from the bytes on disk, never from a `__pycache__` `.pyc`
+  (CPython accepts one by whole-second mtime and size, so two same-length edits
+  inside a second would run stale bytecode), and its loader records exactly
+  those bytes; a build writes no bytecode for anything it imports.
+  A data file is hashed after the body returns, and only while it still has
+  the size and mtime it was opened with (the trace takes both at the open):
+  one that changed or vanished since is recorded `changed while building`,
+  which matches no file, so the next gate rebuilds.
+- **Every read is seen.** A build runs inside a capture
+  (`cadgen._internal.filetrace`). The tracer, one small native library per
+  platform in `_runtime/native`, rewires every library loaded in the build's
+  process -- and each one loaded later -- so its calls to the C library's
+  file opens (kernel32's on Windows) pass through a wrapper that logs the
+  file, its size and its mtime while the capture is open. Every reader ends
+  there: Python's `open`, numpy, build123d's importers, OCCT, FreeType.
+  Folders come from Python's `os.listdir` / `os.scandir` audit events, by
+  frame: the import system's listings and cadgen's own are not the model's.
+  The gate's own reading inside a build (a child's files and outputs, hashed
+  to decide whether it is current) is paused on its thread: a child is an
+  input by its result. Prevents: a model whose data changed reading as
+  current because nobody declared the file. Not seen: a data file the model
+  looked for and did not find (one that appears later is no change); a `.py`
+  file read as text and `exec`'d rather than imported (source counts by reach,
+  and reach follows imports); what a separate program the model runs reads; calls made inside the operating
+  system's own libraries (the macOS shared cache); a file a third-party
+  library caches for the life of a warm worker, after the first build that
+  reads it.
 - **Publish order.** Objects first (components, then the complete tree), the
   document-byte mapping, the outputs (`.step` moved into place atomically;
   digest-bound sidecar), output mappings, then the record. STEP export and
@@ -512,15 +690,24 @@ Each with the failure it prevents.
 - **Closure boundary rule.** A model file reached only through its model
   function is a result edge (pin); a module-level literal taken from it is a
   value edge (`constants`); anything else taken from it is a source edge
-  (file in the closure). Constants by value, functions by file, models by
-  result. Prevents both false-current (a constant imported from a model file
-  changing unnoticed) and false-stale (a child's internal edit — or a comment
-  beside a shared constant — rebuilding every parent).
-  One closure calculation may share immutable import-syntax recipes keyed by
-  exact source bytes, bounded by 8 MiB of accounted inputs/recipes and 256
-  entries. Every lookup still reads the file and resolves current import
-  availability, model classification and constant values; the recipes contain
-  no resolved dependency graph or freshness verdict and do not outlive the call.
+  (file in the closure). A non-model file is in the closure by the names the
+  model reaches in it from the script and from every file the build
+  executed (§3, functions by reach), whole when anything dynamic is in the
+  way; a file that ran here because a child was imported, by what its import
+  runs; a file the imports rely on not existing, as `!<path>`. Constants by
+  value, functions by reach, models by result. Prevents both false-current (a
+  constant imported from a model file changing unnoticed; a helper edit hidden
+  behind a `getattr` on its module; a child's module body patching what this
+  body reads; a new `__init__.py` or module changing what an import finds) and
+  false-stale (a child's internal edit, a comment beside a shared constant, or
+  a helper no reached code calls — rebuilding every parent).
+  One process-wide memo of immutable module-syntax recipes keyed by exact
+  source bytes, bounded by 32 MiB of accounted inputs/recipes and 2048
+  entries, serves the exec hook, every closure walk and every gate: each file
+  revision is analysed once per process. Every lookup still reads the file and
+  resolves current import availability, model classification and constant
+  values; the recipes contain no resolved dependency graph or freshness
+  verdict.
 - **The two sides (§2, the law).** No object references source; no reader
   consults a record; records are deletable. Prevents: a moved or copied
   document rendering differently from its twin, a render path going stale or
@@ -619,24 +806,25 @@ Decided mechanically from the returned geometry and occurrence metadata.
   two links to one object, and a child shared by many parents is stored once.
   Materialization requires the complete transitive object graph. A missing pin
   is an error, never an empty subtree or a request for the child's newer record.
-- Tight occurrence bounds use the existing `op` index, keyed by current native
-  geometry and its full linear transform. Translation shifts those six bounds
-  directly, so translated instances share the expensive surface calculation.
-  Rotation still requires its own tight box; control-polygon bounds are not
-  substituted. Disabled, memory-hit and disk-hit paths evaluate the same
-  origin-normalized function, and cached numeric arrays are never mutated.
+- Tight occurrence bounds live in `index/bounds`, keyed by each leaf's BinTools
+  digest and its transform with the translation removed. Translation shifts
+  those six bounds directly, so translated instances share the expensive
+  surface calculation. Rotation still requires its own tight box;
+  control-polygon bounds are not substituted. Measured, memory-hit and disk-hit
+  boxes come from the same origin-normalized function, and cached numeric
+  arrays are never mutated.
 - Canonical saved-document publication already owns each verified component's
   encoded BREP and each parsed occurrence's exact native placement. Its tight
-  bounds key uses that BREP identity, codec and rotation in the runtime-scoped
-  `op` index, then shifts the six native bounds by translation. A miss measures
+  bounds key uses that BREP identity, codec and rotation in `index/bounds`,
+  then shifts the six native bounds by translation. A miss measures
   every native leaf with the same optimal extrema operation; it never transforms
   a component AABB. Incomplete private inputs fall back to the ordinary composed
   native document, after the same component validation and closure checks.
 - A bounded descriptor composed entirely of pinned links may instead measure
-  exact component bounds from verified canonical BREP objects. The existing
-  `op` index stores only six finite numbers, keyed by BREP digest, all 16
-  placement doubles without rounding, the bounds algorithm and the actual
-  native/binding identity. It uses the same private reconstruction, placement,
+  exact component bounds from verified canonical BREP objects. `index/bounds`
+  stores only six finite numbers, keyed by BREP digest, all 16
+  placement doubles without rounding, the bounds algorithm and the kernel's
+  versions. It uses the same private reconstruction, placement,
   native leaf traversal and final numeric extrema merge as the whole document;
   rotated local AABBs and raw native-box merges are not substitutes. Missing,
   corrupt, unsupported or invalid inputs use the ordinary whole-document path;
@@ -658,24 +846,19 @@ Decided mechanically from the returned geometry and occurrence metadata.
   BREP bytes are limited to 768 KiB, required eager-only SURF bytes to 4 MiB, and retained appearance
   recipes to 256 KiB. This bounds additional encoded payload/recipe retention to
   5.125 MiB, plus bounded Python structures and invocation-owned native shapes;
-  it is not a native allocator RSS guarantee. No native shape enters an op
+  it is not a native allocator RSS guarantee. No native shape enters a
   cache. A failed optional preparation releases its private owners before
   falling back. Larger, new-own-component and unsupported results keep the
   ordinary preparation/publication order. STEP correspondence checks and the
   separate canonical readback of newly emitted saved bytes are unchanged.
 
-Operation keys serialize current geometry from private topology, normalizing
-only non-geometric `Free`/`Checked` flags. Native mutations must change the key.
-Each input is read again: Python properties can mutate geometry even during key
-construction. No TShape-to-content mapping replaces those reads. Shape hashes
-use a cheaper subset of the full equality signature, so collisions still require
-the complete equality check. Vertex hashes read their current native point at
-that same precision, including native point or location edits that leave Python
-coordinate attributes unchanged. The bounded rounding memo stores numeric inputs
-and outputs, never shapes or geometric signatures.
-Input protection and shape-attribute recipes accept actual topology shapes,
-including subclasses; geometry values such as vectors remain value arguments
-even when they also contain a private native wrapper.
+A tree's bounds (`_bbox_from_shape`) walk the native leaves of one composed
+document with no Python callback between leaves, so within that call a
+prototype's content digest is computed once per TShape encountered and
+discarded when the call returns — never retained, never a substitute for the
+next call's read. Vertex hashes (`determinism.py`) read their current native
+point, including native point or location edits that leave Python coordinate
+attributes unchanged.
 
 ## 7. Concurrency
 
@@ -785,6 +968,19 @@ Every build goes through one interface, `cadgen.daemon.executors.submit(model)
   siblings. It inherits the environment, so a test's `CADGEN_CACHE_DIR`
   isolates its store; tests and CI run this way.
 
+**Silence means hung, not busy.** While a job runs, its worker emits a
+heartbeat frame every 10 s (carrying the job's last announced phase and its
+CPU clock). The supervisor consumes heartbeats; they are never relayed to the
+client, never enter the job ledger and never count as progress. A worker that
+sends no frame for 120 s is killed as hung, unless its CPU clock, read from
+outside the process, advanced meanwhile: a native call that holds the GIL (a
+long OCCT boolean) starves the heartbeat thread but is computing. A stopped
+process, or a deadlock that holds the GIL, sends nothing and accrues no CPU. A
+hang that releases the GIL (a network read with no timeout, a Python-level
+deadlock) keeps beating and is not killed. A body's length is therefore
+unbounded; the heartbeat stops before the job's exit frame, so none
+reaches the next job.
+
 **One daemon per address, by lock.** The daemon takes an exclusive lock keyed
 by its socket address (`cadgen.daemon.transport.SingletonLock`: `flock` on
 POSIX, `msvcrt.locking` on Windows, released by the kernel when the holder
@@ -860,7 +1056,7 @@ CPU scheduling and reuse remain independent of memory admission:
    stale child build it once.
 3. **Idle unbind — 10 minutes** (`CADGEN_DAEMON_IDLE_UNBIND`). A bound worker
    idle that long returns to the spare set (spares beyond K exit); its model's
-   next build rebinds a spare — no import repaid — with a cold RAM op-memo tier.
+   next build rebinds a spare — no import repaid.
    Purely RAM: idle workers hold no slot and never block a new model.
 
 **Memory admission.** The daemon sums worker RSS including extraction
@@ -1108,34 +1304,13 @@ the last complete view's ownership. No automatic-save producer exists in this
 runtime: all decorated runs have explicit completion obligations, so display
 supersession does not cancel their exports.
 
-## 9c. Pure parameterized features
-
-The optional `@memo` decorator declares a pure intermediate geometry
-factory, with the author preconditions and execution limits in
-[`MEMO.md`](MEMO.md). It declares no output, model record or job. The
-existing `index/op` maps its scheme/runtime/code/source/helper/global/default/
-closure/argument key to a canonical BREP object and attribute recipe. Objects
-contain no source paths. Hits verify disk content and reconstruct a private
-shape; misses, disabled reuse and hits apply the same eligible return codec.
-No native shape is retained between calls. Missing or corrupt objects re-miss
-and repair through the ordinary atomic object/index writes.
-
-Only a worker bootstrap preceding authored module loading can establish reuse
-trust. Generic embedded execution runs the body, and cannot upgrade an earlier
-untrusted snapshot. Guards are defensive checks within the declared pure-factory,
-unmodified-dependency contract, not a complete proof about arbitrary Python
-monkeypatches. Unsupported code or inputs execute normally. Code recipes are
-bounded to 256 entries and 1 MiB; no persistent trace or hidden dependency graph
-is added. Captured helper files stay in the model's closure on a hit, and full
-source-file digests conservatively invalidate other features in that file.
-Explicit model saves still obey every child/output/publication requirement.
-
 ## 10. Debugging
 
 - Which record: `index/model/<sha256(script::function)>` —
   `cadgen store why <model.py>` prints it (every model of the file; name one
   as `model.py::function`), the gate's verdict clause by
-  clause (with each child's pinned vs current tree), the closure files and
+  clause (with each child's pinned vs current tree), the closure files (a
+  sliced helper as `lib/geo.py[plane, cyl_along, …]`, its reached names) and
   the tree's links. The verdict line names the first stale clause as a
   phrase: `no record`, `closure changed: <file>` (the record keeps each
   closure file's hash under `closure.shas`), `constant changed: <NAME> in

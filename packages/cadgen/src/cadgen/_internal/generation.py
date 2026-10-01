@@ -247,7 +247,9 @@ def _source_sidecar_payload(scene: LoadedStepScene) -> dict[str, object] | None:
         closure_files = getattr(scene, "source_closure_files", ()) or ()
         if closure_hash and closure_files:
             payload["sourceClosureHash"] = closure_hash
-            payload["sourceClosureFiles"] = list(closure_files)
+            from cadgen.store.closure import source_files
+
+            payload["sourceClosureFiles"] = source_files(closure_files)
     payload["generatedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     return payload
 
@@ -344,6 +346,13 @@ def _generate_part_outputs(
     package_provenance = {} if raw_document else _assembly_provenance_manifest(
         scene, selector_options=selector_options, step_path=spec.step_path
     )
+    if getattr(scene, "disposable_prototypes", False):
+        # The reference scene's decoded prototypes have classified the topology
+        # (the edge policy above); everything after this reads geometry from
+        # the pinned trees. Drop them now rather than carry a second complete
+        # native copy of a large assembly through its export and read-back.
+        scene.prototype_shapes = {}
+        scene.prototype_face_colors = {}
 
     def component_package_job() -> dict[str, object]:
         from pathlib import Path
@@ -513,6 +522,8 @@ def _generate_part_outputs(
         closure_hash = str(getattr(scene, "source_closure_hash", "") or "")
         closure_files = list(getattr(scene, "source_closure_files", ()) or ())
         closure_shas = dict(getattr(scene, "source_closure_file_hashes", None) or {})
+        closure_names = {rel: list(names) for rel, names in (getattr(scene, "source_closure_names", None) or {}).items()}
+        closure_wholes = dict(getattr(scene, "source_closure_wholes", None) or {})
         closure_static = False
         reemit_source_hash = getattr(scene, "reemit_source_hash", None)
         if not generated:
@@ -522,6 +533,7 @@ def _generate_part_outputs(
             step_hash = str(getattr(scene, "step_hash", "") or "") or step_file_hash(spec.step_path)
             closure_files = [spec.step_path.name]
             closure_shas = {spec.step_path.name: step_hash}
+            closure_names, closure_wholes = {}, {}
             closure_hash = _closure_hash([(spec.step_path.name, step_hash)])
         elif reemit_source_hash and not closure_hash:
             # A re-emitted document (`cadgen step build IN OUT`): its source is
@@ -530,6 +542,7 @@ def _generate_part_outputs(
             from cadgen.store.closure import closure_hash as _closure_hash
 
             closure_files = []
+            closure_names, closure_wholes = {}, {}
             closure_hash = _closure_hash(
                 [("reemit", str(reemit_source_hash)), ("annotation", str(getattr(scene, "reemit_annotation_hash", "") or ""))]
             )
@@ -559,7 +572,8 @@ def _generate_part_outputs(
             "tree": tree_hash,
             "unannotatedTree": str(stats.get("unannotatedTree") or tree_hash),
             "documentTree": document_tree_hash if spec.step_output else None,
-            "closure": {"hash": closure_hash, "files": closure_files, "shas": closure_shas, "static": closure_static},
+            "closure": {"hash": closure_hash, "files": closure_files, "shas": closure_shas, "names": closure_names,
+                        "wholes": closure_wholes, "static": closure_static},
             # Literals imported from model files, tracked by VALUE (gate clause 2).
             "constants": dict(getattr(scene, "source_closure_constants", None) or {}) if generated else {},
             "children": list(getattr(scene, "store_children", None) or []),
@@ -623,7 +637,8 @@ def _generate_part_outputs(
             # A re-emitted STEP has an immutable byte/annotation input closure,
             # not a Python source closure that current_closure_hash can read.
             if not closure_static:
-                decision = decide(model_path, ran_closure_hash=closure_hash, ran_files=closure_files)
+                decision = decide(model_path, ran_closure_hash=closure_hash, ran_files=closure_files, ran_names=closure_names,
+                                  ran_shas=closure_shas, ran_wholes=closure_wholes)
                 if not decision.publish_outputs:
                     raise RuntimeError(f"{spec.cad_ref}: result was not saved: {decision.reason}")
             if staged_step is not None and expected_document_pair is not None:

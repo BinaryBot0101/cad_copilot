@@ -72,7 +72,6 @@ FORWARDED_ENV_VARS = (
     "LOCALAPPDATA",
     "PYTHONPATH",
     "CADGEN_FFMPEG",
-    "CADGEN_MEMO_CACHE",
 )
 
 # The client's own ffmpeg, looked up once per process. Resolved HERE rather than
