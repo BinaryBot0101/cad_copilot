@@ -85,7 +85,7 @@ let server, browser, temporary;
 let revision = 1;
 before(async () => {
   temporary = await mkdtemp(join(tmpdir(), 'text-to-cad-robot-browser-'));
-  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl' } });
+  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl', '.svg': 'dataurl' } });
   const bundle = await readFile(join(temporary, 'harness.js'));
   const css = await readFile(new URL('../../../dist/styles.css', import.meta.url));
   server = createServer((request, response) => {
@@ -172,7 +172,7 @@ async function open(t, file, { panel = true } = {}) {
     // The nav row's panel toggles, in order, each with whether its panel is the open one.
     panels: () => pane.locator('[data-file-panel]')
       .evaluateAll(buttons => buttons.map(button => `${button.getAttribute('aria-label')}:${button.getAttribute('aria-pressed')}`)),
-    toggle: id => id === 'cad-display' ? pane.getByRole('button', { name: 'Display settings', exact: true }) : pane.locator(`[data-file-panel="${id}"]`),
+    toggle: id => id === 'cad-display' ? pane.getByRole('button', { name: 'Settings', exact: true }) : pane.locator(`[data-file-panel="${id}"]`),
     // The tool stack's panels on screen, top to bottom, by their accessible names.
     stack: () => pane.locator('[data-cad-tool-stack] [data-tool-panel]').evaluateAll(panels => panels
       .filter(panel => panel.getClientRects().length > 0).map(panel => panel.getAttribute('aria-label'))),
@@ -458,7 +458,7 @@ test('Select picks links at once; a selection lives only under Select; Links sho
   assert.equal(await reference.getByRole('heading').innerText(), 'upper_arm');
   const [links, pinned] = await Promise.all([robot.linksPanel().boundingBox(), reference.boundingBox()]);
   assert.ok(pinned.y >= links.y + links.height, 'under Links');
-  assert.equal(pinned.width, links.width, 'the stack\'s one width');
+  assert.equal(pinned.width, links.width, 'the one width, until a person sizes either');
   // A link's facts are in the panel's one face and size, never monospace, in compact rows.
   const faces = await reference.locator('[data-tool-panel-body] *').evaluateAll(nodes => [...new Set(nodes
     .filter(node => !node.childElementCount && node.textContent.trim())
@@ -466,14 +466,16 @@ test('Select picks links at once; a selection lives only under Select; Links sho
   assert.equal(faces.length, 1, `one face and size: ${faces.join(' / ')}`);
   assert.doesNotMatch(faces[0], /mono/i);
   assert.ok((await reference.locator('[data-info-row]').first().boundingBox()).height <= 19, 'a compact row');
-  // Links folds to its filter row by the chevron at that row's end, and its Reference keeps its place under it.
+  // Links closes by the X at its filter row's end, and the Reference moves up into its place;
+  // Select, pressed while it is the tool, opens Links again with its selection.
   const linksPanel = robot.linksPanel();
-  const filterRow = linksPanel.locator('[data-slot=tree-filter]');
-  await filterRow.getByRole('button', { name: 'Collapse links', exact: true }).click();
-  assert.ok(Math.abs((await linksPanel.boundingBox()).height - (await filterRow.boundingBox()).height - 2) <= 1, 'folded to its filter row');
-  assert.ok((await reference.boundingBox()).y < pinned.y, 'the Reference moves up under it');
-  await filterRow.getByRole('button', { name: 'Expand links', exact: true }).click();
-  await robot.pressed(['Select upper_arm'], 'the tree kept its selection while folded');
+  await linksPanel.locator('[data-slot=tree-filter]').getByRole('button', { name: 'Close links', exact: true }).click();
+  await linksPanel.waitFor({ state: 'hidden' });
+  assert.deepEqual(await robot.stack(), ['Reference details']);
+  assert.ok((await reference.boundingBox()).y < pinned.y, 'the Reference moves up into its place');
+  await robot.tool('Select').click();
+  await linksPanel.waitFor();
+  await robot.pressed(['Select upper_arm'], 'the tree kept its selection while closed');
   // Leaving Select drops the selection, in the tree and the viewport alike.
   await robot.tool('Position').click();
   await robot.waitPressed(0);
@@ -634,7 +636,7 @@ test('an SDF is the same robot with a section of its own; a snapshot depicts the
   assert.deepEqual(await robot.toolNames(), ['Select:false', 'Position:true']);
   await robot.openPosition();
 
-  await pane.getByRole('button', { name: 'Take snapshot', exact: true }).click();
+  await page.evaluate(() => window.cadHarness.capture());
   await page.waitForFunction(() => window.cadHarness.captures.length === 1);
   const captured = await page.evaluate(() => window.cadHarness.captures[0]);
   assert.deepEqual([captured.file, captured.type, captured.references.length], ['swing.sdf', 'image/png', 1], 'one context, of the file');

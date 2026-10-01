@@ -1,11 +1,9 @@
 // What a host gets from the surface, and what it can ask of it, about
 // references (docs/cad-renderer.md, "Prompt references, captures and extensions").
 //
-// Copy actions write only to the clipboard. Explicit Add to prompt actions
-// send references to the host. In the other direction, selectReference asks
-// the surface to select geometry named by a reference from the host.
-import { createContext, useContext } from "react";
-
+// Copy actions write only to the clipboard; a Quick Edit carries the selection's
+// references to the agent. In the other direction, selectReference asks the
+// surface to select geometry named by a reference from the host.
 import { isNativeCadSelector, parseCadRefToken } from "@text-to-cad/core/lib/cadRefs.js";
 import { STEP_TREE_TOPOLOGY_NODE_PREFIX, stepTreeNodeChildren } from "@text-to-cad/core/lib/step/stepTree.js";
 
@@ -29,9 +27,9 @@ function selectorFromStepTreeInternalId(value) {
  * A copied line as the host sees it: the file it belongs to (served-root
  * relative, as `cadFileParamForEntry` gives it), the selector half without its
  * `#` (`""` for a whole file), and the text exactly as copied. The prefix on
- * the copied line is the viewer's shortest-unique suffix, which is right for a
- * prompt and wrong for a host that wants to open the file, so `file` is
- * always the full path.
+ * the copied line is the name the host gives the file for a prompt
+ * (`FileSource.referencePath`), which need not be the path it opens the file
+ * by, so `file` is always the served-root path.
  */
 export function referenceFromCopyText(text, file) {
   const copied = String(text || "").trim();
@@ -47,13 +45,6 @@ export function referencesFromCopyText(text, file) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => referenceFromCopyText(line, file));
-}
-
-/** Clipboard delivery and explicit add-to-prompt, when a host is listening. */
-export const HostReferenceContext = createContext(null);
-
-export function useHostReference() {
-  return useContext(HostReferenceContext);
 }
 
 const ENTITY_RE = /^([sfev])(\d+)$/;

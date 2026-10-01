@@ -37,6 +37,8 @@ import {
   PROGRESSIVE_LOAD_MAX_INFLIGHT_BYTES,
   progressiveLoadProgress,
   publishMeshCostAccounting,
+  awaitingSameFileRevision,
+  meshStateAfterCancelledLoad,
   shouldRetainCompleteSameFileMesh
 } from "./packageProgressiveLoad.js";
 import { initialDisplayLodPlan, probeInitialDisplayLod } from "../../../render/initialDisplayLod.js";
@@ -633,9 +635,7 @@ export function useCadAssets({
     if (ctx && ctx.complete === false) {
       lodPackageRef.current = null;
       setLodPackage(null);
-      setMeshState((current) => (
-        current && current.file === ctx.file && !current.assemblyInteractionReady ? null : current
-      ));
+      setMeshState((current) => meshStateAfterCancelledLoad(current, ctx.file));
       syncDisplayedMemory(null);
     }
     const displayed = matchingDisplayedPackageContext(
@@ -677,6 +677,13 @@ export function useCadAssets({
     const requestId = requestIdRef.current;
 
     if (!entryHasMesh(entry)) {
+      // The same file, rewritten, before its next revision is built: what is on screen stays,
+      // and the revision replaces it when it arrives.
+      if (awaitingSameFileRevision(meshStateRef.current, entry)) {
+        setStatus(ASSET_STATUS.PENDING);
+        setError("");
+        return;
+      }
       displayedLodPackageRef.current = null;
       displayedReferenceCompositionRef.current = null;
       syncDisplayedMemory(null);
@@ -774,7 +781,7 @@ export function useCadAssets({
       // its assembly.json, fetch each unique component GLB once, and compose them in
       // world space. A non-package descriptor is a stale/unbuilt artifact (throws below).
       const sourceSidecarUrl = entrySourceSidecarUrl(entry);
-      const inlineSourceSidecar = !entry?.editingPreview && entry?.sourceSidecar && typeof entry.sourceSidecar === "object"
+      const inlineSourceSidecar = entry?.sourceSidecar && typeof entry.sourceSidecar === "object"
         ? validateSourceSidecar(entry.sourceSidecar, {
             url: sourceSidecarUrl || entry?.file,
             documentHash: entry?.documentHash,

@@ -21,9 +21,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PLUGIN_NAME = "cad"
-MARKETPLACE_NAME = "text-to-cad"
+MARKETPLACE_NAME = "earthtojake"
 
 CLAUDE_PLUGIN_PATH = REPO_ROOT / ".claude-plugin" / "plugin.json"
+CODEX_MCP_PATH = REPO_ROOT / "codex.mcp.json"
 CODEX_PLUGIN_PATH = REPO_ROOT / ".codex-plugin" / "plugin.json"
 MARKETPLACE_PATH = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 SKILLS_ROOT = REPO_ROOT / "skills"
@@ -67,6 +68,20 @@ class PluginManifestPolicyTest(unittest.TestCase):
                 f"{path.relative_to(REPO_ROOT)} must point at ./skills/",
             )
 
+    def test_codex_icons_are_plain_square_pngs_in_the_package(self) -> None:
+        # Codex draws the plugin's tab, sidebar entry and chips from these; without them it draws a
+        # placeholder. Installers clone without git-lfs, so an icon under the LFS-tracked assets/
+        # would arrive as a pointer file: each must be a real PNG in the package.
+        interface = load_json(CODEX_PLUGIN_PATH)["interface"]
+        for key in ("composerIcon", "logo"):
+            with self.subTest(key=key):
+                path = (REPO_ROOT / interface[key]).resolve()
+                self.assertTrue(path.is_relative_to(REPO_ROOT) and path.is_file(), f"{key}: {interface[key]}")
+                data = path.read_bytes()
+                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n", f"{key} is not a PNG (an LFS pointer?)")
+                width, height = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+                self.assertTrue(width == height >= 48, f"{key} is {width}x{height}: square, 48px or more")
+
     def test_marketplace_lists_the_plugin_at_the_repository_root(self) -> None:
         marketplace = load_json(MARKETPLACE_PATH)
         self.assertEqual(marketplace.get("name"), MARKETPLACE_NAME)
@@ -89,6 +104,31 @@ class PluginManifestPolicyTest(unittest.TestCase):
             VALID_ROOT_SOURCES,
             "marketplace entry must source the plugin from the repository root",
         )
+
+    def test_codex_starts_the_cad_server_pinned_in_the_threads_workspace(self) -> None:
+        # One uniquely named server (a host allowlists servers by name), run by uvx from the
+        # runtime this plugin version pins. Not offline: the first start after an install or an
+        # update downloads that runtime, given the time to (an offline start of an uncached pin
+        # fails, which left every update without CAD until setup ran again). No `cwd`: Codex
+        # then starts each thread's server in that thread's workspace, which is how the
+        # server knows where the thread's files are before the agent says anything.
+        manifest = load_json(CODEX_PLUGIN_PATH)
+        self.assertEqual(manifest.get("mcpServers"), "./codex.mcp.json")
+        # Codex resolves the onboarding skill as a path from the plugin root, to its SKILL.md.
+        self.assertEqual(manifest.get("extensions", {}).get("com.openai", {}).get("onboardingSkill"), "./skills/cad-mcp-setup/SKILL.md")
+        self.assertTrue((SKILLS_ROOT / "cad-mcp-setup" / "SKILL.md").is_file())
+        servers = load_json(CODEX_MCP_PATH)["mcpServers"]
+        self.assertEqual(list(servers), ["cad"])
+        server = servers["cad"]
+        self.assertNotIn("cwd", server)
+        self.assertEqual(server["command"], "uvx")
+        args = server["args"]
+        self.assertNotIn("--offline", args)
+        self.assertGreaterEqual(server.get("startup_timeout_sec", 0), 300)
+        self.assertIn("--no-config", args)
+        self.assertEqual(args[-2:], ["cadgen", "mcp"])
+        version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(args[args.index("--from") + 1], f"cadgen=={version}")
 
     def test_no_stale_plugin_subdirectory_package_remains(self) -> None:
         # The generated `plugins/cad/skills` copy is what the repo-root move

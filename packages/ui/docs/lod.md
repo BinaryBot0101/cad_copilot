@@ -195,7 +195,10 @@ the daemon must be running for live updates.
 **The feed.** Updates arrive through a held request that wakes when this
 output's build ledger changes. Unrelated jobs do not wake the tab. The server
 admits 32 waiters independently of kernel workers; excess tabs retry every
-500 ms. An idle heartbeat revalidates saved bytes and missing geometry; closing
+500 ms. A server that answers at once instead (a host relaying requests through a
+few slots all its views share, where a held request would take one) is paced by the feed: an answer
+with nothing new waits out the rest of a second, and news is asked after again
+within a tenth of one. An idle heartbeat revalidates saved bytes and missing geometry; closing
 or switching the tab cancels the request. Older status responses cannot
 overwrite newer cached progress, and saved revisions are verified from one
 coherent file snapshot. Restarting the daemon expires the ephemeral session,
@@ -203,8 +206,12 @@ and rerunning the model reconnects it.
 
 **What stays on screen.** The prior model stays visible while the next request
 builds; failed updates remain visible while an idle disconnected feed retries
-quietly. Complete plain STEP assemblies also remain visible while replacement
-meshes load. Complete displayed component arrays remain available while a
+quietly. A complete model of the same file — a part's or an assembly's — also
+remains visible while its rewritten file is rebuilt and while the replacement
+meshes load (`replacingSameFileMesh`, `awaitingSameFileRevision`), reported as an
+update ("Updating model…"), never as the loading screen — also when edits come
+faster than revisions load, and one revision's load is cancelled for the next
+(`meshStateAfterCancelledLoad`). Complete displayed component arrays remain available while a
 replacement stages or fails. Reuse requires the same runtime surface input,
 concrete surface object and tessellation; placements and appearance come from
 the new tree. Selection, measurements and reference copying wait for matching
@@ -218,21 +225,19 @@ independently; a superseded request cannot cancel its replacement. Topology
 requests for one file revision union rather than supersede: a batch in flight
 finishes, and one no longer wanted is simply not published.
 
-**After a save.** Source files hold the authored changes; there is no hidden
-durable preview document, and every explicit model run still waits for its
-declared outputs. A successful save leaves that revision's authored preview
-displayed, with nothing announced. A later successful no-op run without a new
-preview, or an expired preview with a validated saved result, uses the saved
-file instead.
+**After a save.** The view shows the saved file. When a build writes it, the new
+revision replaces the one on screen in place, keeping every component whose identity
+it shares; while the build runs the model on screen says it is updating, and a failed
+build leaves it on screen under its alert.
 
-**What the viewport shows.** The breadcrumb carries no status. Opening and
+**What the viewport shows.** The navbar carries no status. Opening and
 updating are the viewport's loading overlay (`ViewerLoadingOverlay`). A failure is
 a card over the viewport (`kit/status/ViewerAlertCard.jsx`) with its explanation,
 its next step and the full diagnostic under Details: an error always shows, and a
 failed update the model survives (`blocking: false`, the previous version still on
 screen) has a Dismiss button and stays dismissed until the alert changes, or
-clears and is raised again. A warning is a card only while nothing is on screen;
-beside a model, a STEP lists it in its panel's Issues. Once a
+clears and is raised again. A warning is a card too, one that can be dismissed
+while the model is on screen: the card is the one place a problem is said. Once a
 usable current view is displayed, saving, successful completion, idle edit-feed
 state and routine refinement stay quiet. A sidecar this build cannot read raises
 no alert: the model renders with no kinematics, no materials and no routine, and

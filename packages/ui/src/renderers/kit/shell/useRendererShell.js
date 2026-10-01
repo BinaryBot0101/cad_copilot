@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Camera, Pencil } from "lucide-react";
+import { Pencil } from "lucide-react";
 import { clonePerspectiveSnapshot } from "@text-to-cad/core/lib/perspective.js";
 import { VIEWER_SCENE_SCALE } from "@text-to-cad/core/lib/viewer/sceneScale.js";
 import { ViewerElementContext, useViewerHost, usePromptDestination } from "../../../host/context.js";
@@ -21,6 +21,7 @@ import { shellLoadReport } from "./loadReport.js";
 import { createViewPromptContext, promptDeliveryError } from "./promptContext.js";
 import { fileViewsEqual, plainShellCamera, readFileView, readFileViewSlices, scopeShellCamera, shellPresentationKey, writeFileView } from "./fileView.js";
 import { useViewerShortcuts } from "./useViewerShortcuts.js";
+import { useWhenSettled } from "./useWhenSettled.js";
 
 /**
  * Preview mode's one state: the viewer with its tools put away, orbiting the model and
@@ -71,7 +72,7 @@ const EMPTY = Object.freeze({});
  *    queued application to the viewport, and the Display panel's content;
  *  - tools: the mode state machine and Draw's session, or none at all for a
  *    renderer whose viewport is the camera's alone;
- *  - the host contract: navbar actions, prompt snapshots, clipboard screenshots,
+ *  - the host contract: prompt snapshots, clipboard screenshots,
  *    preview, alerts, shortcuts (a file's controls are tool-stack panels the renderer
  *    shows with its tools, never a host panel);
  *  - the live command surface, with the renderer's added and declined commands.
@@ -105,7 +106,7 @@ const EMPTY = Object.freeze({});
  *   `set` is given the mode `toolModes` decided. Omitted: the shell holds the state.
  * @param {import("../scene.js").KitScene | null} options.scene
  * @param {{ busy: boolean, updating?: boolean, progress?: object | null, alert?: object | null,
- *   editPending?: boolean, currentPreview?: boolean, finding?: boolean }} options.load  The
+ *   editPending?: boolean, finding?: boolean }} options.load  The
  *   renderer's document load. `busy`: nothing to show yet. `updating`: a newer revision is loading behind the scene on
  *   screen. The rest are for a renderer whose document is more than a download — see `loadReport.js`.
  * @param {object | null} [options.animation]  A playbar runtime (with its own `clock`), when the file has
@@ -168,7 +169,7 @@ export function useRendererShell({
   const destination = usePromptDestination();
   const promptAvailable = destination.available;
   const composer = destination.kind === "composer";
-  const { onNavigationActionsChange, onStateChange, appearance } = view;
+  const { onStateChange, appearance } = view;
   const colorScheme = appearance?.colorScheme === "dark" ? "dark" : "light";
   const ownPreview = usePreviewState();
   const { previewing, set: setPreviewing } = preview || ownPreview;
@@ -332,6 +333,7 @@ export function useRendererShell({
   const selectDefaultTool = useCallback(() => setToolMode(toolModes ? toolModes.defaultMode : ""), [toolModes, setToolMode]);
   const drawing = useDrawingSession(drawToolActive, CAD_DRAWING_DEFAULTS);
 
+
   // ---- prompt snapshots, clipboard ------------------------------------------
   const showPromptResult = useCallback((result) => reportActionError(promptDeliveryError(result)), [reportActionError]);
   const deliverPrompt = useCallback((context) => {
@@ -364,12 +366,22 @@ export function useRendererShell({
     } catch (error) { reportActionError(error); }
   }, [modelKey, promptAvailable, viewerLoading, deliverPrompt, resource, composer, host.clipboard, reportActionError]);
   const copyActionRef = useRef(null);
+  // Draw's Copy: the view with its ink, to the clipboard; true once it is there.
   const copyDrawing = useCallback(async () => {
-    if (!drawing.hasContent || !viewerRef.current?.captureScreenshotBlob) return;
+    if (!drawing.hasContent || !viewerRef.current?.captureScreenshotBlob) return false;
     try {
       await host.clipboard.writeImage(viewerRef.current.captureScreenshotBlob());
-    } catch (error) { reportActionError(error); }
+      return true;
+    } catch (error) { reportActionError(error); return false; }
   }, [drawing.hasContent, host.clipboard, reportActionError]);
+  // The view as it is on screen, ink included: Quick Edit's sketch.
+  const captureView = useCallback(() => {
+    if (!viewerRef.current?.captureScreenshotBlob) return Promise.reject(new Error("The viewer is not ready"));
+    return viewerRef.current.captureScreenshotBlob();
+  }, []);
+  // How a copied reference names a file of this view's source (`FileSource.referencePath`).
+  const source = view.source;
+  const referencePath = useCallback(path => (source?.referencePath ? source.referencePath(path) : path), [source]);
   const captureKey = services.captureRequest?.key ?? null;
   const appliedCaptureKey = useRef(null);
   useEffect(() => {
@@ -379,19 +391,10 @@ export function useRendererShell({
     capture();
   }, [captureKey, viewerLoading, promptAvailable, services.acknowledgeCommand, capture]);
 
-  // Publishing navbar actions must not feed parent renders back into this renderer.
-  const captureRef = useRef(capture);
-  captureRef.current = capture;
-  useEffect(() => {
-    const actions = modelKey ? [{ id: "snapshot", label: "Take snapshot", hint: "Snapshot", icon: Camera,
-      disabled: viewerLoading || !scene || !promptAvailable, onInvoke: () => captureRef.current() }] : [];
-    onNavigationActionsChange?.(actions);
-    return () => onNavigationActionsChange?.([]);
-  }, [onNavigationActionsChange, modelKey, viewerLoading, Boolean(scene), promptAvailable]);
-
   // ---- shortcuts ------------------------------------------------------------
   const escapeRef = useRef(escape.handle);
   escapeRef.current = escape.handle;
+  const escapeView = useCallback(() => escapeRef.current?.() || false, []);
   useViewerShortcuts({
     viewerElement,
     onCopy: () => copyActionRef.current?.() || false,
@@ -415,15 +418,17 @@ export function useRendererShell({
       // What is SHOWN, which is not always what is loading: a rebuild that keeps its
       // predecessor on screen reports the predecessor's revision until it is replaced.
       const shown = liveResourceRef.current?.() || resource;
+      const rendererState = live.state?.() || {};
       return {
-        resource: { ...shown }, revision: String(shown.revision || ""), loading: viewerLoading || !scene,
+        resource: { ...shown }, revision: String(shown.revision || ""),
         // Live state reads the selection in the prompt grammar. References are already in it
         // only where the default builder assembles the snapshot; a renderer that keeps its own
         // vocabulary reports its selection through `live.state`, so it is never passed on raw.
         selection: promptContextRef.current === createViewPromptContext ? referencesRef.current?.() || [] : [],
         camera: clonePerspectiveSnapshot(viewerRef.current?.getPerspective?.() || activePerspectiveRef.current),
         display, renderMode: display.mode === "render" ? "render" : "inspect",
-        ...(live.state?.() || {})
+        ...rendererState,
+        loading: Boolean(viewerLoading || !scene || load.updating || presentationPending || rendererState.loading)
       };
     },
     setCamera(camera) {
@@ -457,8 +462,14 @@ export function useRendererShell({
       if (!viewerRef.current?.captureScreenshotBlob) throw new Error("The viewer cannot capture this model yet.");
       return viewerRef.current.captureScreenshotBlob();
     },
+    thumbnail(size) {
+      if (!viewerRef.current?.captureThumbnail) throw new Error("The viewer cannot picture this model yet.");
+      return viewerRef.current.captureThumbnail(size);
+    },
     ...(live.commands || {})
   };
+  // Settled is what live state says: the file whole, on screen, drawn, and the renderer not busy.
+  const whenSettled = useWhenSettled(() => !liveRuntimeRef.current.readState().loading);
   const liveBinding = services.live;
   const commandNames = Object.keys(live.commands || {}).sort().join("\n");
   const declinedRef = useRef(live.declined);
@@ -466,9 +477,9 @@ export function useRendererShell({
   useEffect(() => {
     if (!liveBinding) return undefined;
     return attachLiveBinding(liveBinding, () => liveRuntimeRef.current, {
-      commands: commandNames ? commandNames.split("\n") : [], declined: declinedRef.current || {}
+      commands: commandNames ? commandNames.split("\n") : [], declined: declinedRef.current || {}, ready: whenSettled
     });
-  }, [liveBinding, commandNames]);
+  }, [liveBinding, commandNames, whenSettled]);
 
   // ---- what the frame and the renderer read ---------------------------------
   // The Display panel's content: every renderer's, built here from its display settings.
@@ -512,6 +523,9 @@ export function useRendererShell({
       previewOrbitSpeed, setPreviewOrbitSpeed, toolStack, changeToolStack, viewerLoading, loading, presentationState,
       handlePresentationChange, viewerAlert, setRuntimeAlert,
       copyActionRef, copyDrawing, copyShortcut: host.environment.platform === "darwin" ? "⌘C" : "Ctrl+C",
+      // Quick Edit's: the file it is about, how a copied prompt spells its paths, its sketch, and
+      // the renderer's own Escape, which an empty Quick Edit passes on.
+      resource, referencePath, captureView, escape: escapeView,
       drawToolActive, drawing, animation, display
     }
   };

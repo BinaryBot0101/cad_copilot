@@ -1,10 +1,13 @@
 # @text-to-cad/ui
 
 The shared React interface for text-to-cad. `FileViewer` is the complete file tab:
-its breadcrumb row, menus, content, file tree, one panel column, loading and
-error states, and common edit/save/reload lifecycle. `apps/web` consumes this
-component through the package's compiled exports; a host's own project, session
-and window layout remains application code.
+its navbar, menus, content, the file explorer that floats over it, the column a
+file's own panels open in, loading and error states, and common edit/save/reload
+lifecycle. `CadViewer` (`@text-to-cad/ui/cad-viewer`) is the CAD viewer every app
+shows: FileViewer over one root's CAD catalog, with the five CAD renderers, the
+home (the model library) and the standard loading and missing-file pages.
+`apps/web` and `apps/mcp` consume both through the package's compiled exports; a
+host's own project, session and window layout remains application code.
 
 The viewer's tools, tool stack, settings, tooltips and keyboard follow one
 binding [design system](docs/settings-ui.md), the same in both apps. A change to
@@ -48,20 +51,22 @@ clipped. Native HTML `title` attributes are not used for interface tooltips.
 The token uses rems so desktop UI scaling still works without changing the
 normal 16px root or shrinking layout spacing.
 
-File-tab chrome uses normal-weight type. Breadcrumbs, file and model rows, and
-filter matches use muted/primary text color for emphasis, never bold weight. Tree
+File-tab chrome uses normal-weight type. The navbar's file name, file and model rows,
+and filter matches use muted/primary text color for emphasis, never bold weight. Tree
 rows — files, model features, robot links — are 12px, the size of the section
 titles and the filter above them.
 Both tree lists inset row backgrounds 4px from their horizontal edges, including
 selected, hovered and filtered rows; nesting adds indentation inside that gutter.
-The host's panel column (the file tree) is 280px by default and 200px at least; a
-drag past the minimum stops at it, and only a drag below half of it closes the
-column. Below 720px of total FileViewer width, it is a dismissible floating sheet and
-never shrinks the scene. The sheets have no extra visible title row and never scroll
-or translate the host page. A CAD file's controls are not a panel of that column but
-of the viewer's own tool stack under the toolbar: one width for every panel (190px
-by default, 160px at least, resized together), bounded by the viewer's height.
-The view cube is hidden on mobile. Breadcrumbs and progress indicators use this same breakpoint. Panels never
+The file explorer (the host's file tree) floats over the view's LEFT, inset 8px
+from its edges like the tool strip, on a solid background above the tools; it never
+resizes the view or moves its tools. It is 220px by default, 140px at least and
+480px at most; a drag of its right edge past the minimum stops at it, and only a
+drag below half of it closes it. Below 720px of total FileViewer width it is a
+dismissible floating sheet. The sheets have no extra visible title row and never
+scroll or translate the host page. A CAD file's controls are not a panel of the
+explorer but of the viewer's own tool stack under the toolbar: one width for every
+panel until a person sizes one, bounded by the viewer's height.
+Progress indicators use this same breakpoint. Panels never
 scroll sideways: a Position panel's labels truncate to preserve its sliders and
 inputs.
 
@@ -75,8 +80,10 @@ these peers are not bundled into UI.
 src/
   host/              explicit host ports, prompt actions and React binding
   drawing/           reusable Excalidraw editor; desktop scratch drawing host
+  cad-viewer/        CadViewer (FileViewer + the five CAD renderers + the home), and the catalog it browses
   file-viewer/       FileViewer, typed source/renderer contracts, lifecycle hooks
-    navigation/     breadcrumbs, file tree, entry menus and panel frame
+    navigation/     the navbar and its links, the file explorer and tree, entry menus, the panel column
+  library/           a host's home: the models opened before, to open again, and their pictures
   renderers/
     kit/            the frame every viewer file shares: viewport, tools, panels, Display settings, status
     step/           STEP: Features tree, Position, routines, feature recognition
@@ -128,7 +135,21 @@ const renderers = [createStepRenderer({ client, preferences }), createDxfRendere
 
 Public entry points include `/host`, `/file-viewer`, `/tab-store`, `/navigation`, `/renderers/step`,
 `/renderers/dxf`, `/renderers/glb`, `/renderers/mesh`, `/renderers/robot`, `/renderers/workspace`, `/file-viewer/presentation`, `/file-viewer/empty`,
-`/drawing`, `/loading-icon`, `/utils`, `/primitives/*`, `/tokens.css`, and `/styles.css`.
+`/cad-viewer`, `/catalog`, `/links`, `/library`, `/drawing`, `/loading-icon`, `/utils`, `/primitives/*`,
+`/tokens.css`, and `/styles.css`. `/catalog` (a CAD catalog as a `FileSource`, the file menu's
+copies and reveal, and the paths a root names a file by) and `/links` (the navbar's link
+defaults) are pure modules, with no React, for a host's adapters and their unit tests.
+
+A CAD host composes `CadViewer` rather than FileViewer and the renderers: it hands
+over its root's client and file source, its ports, its tab store, the file on screen
+and how to show another (`onShow`), and its library.
+
+```tsx
+import { CadViewer, createCatalogFileSource } from '@text-to-cad/ui/cad-viewer';
+
+<CadViewer client={client} host={host} tabStore={tabStore} live={live} file={file}
+  onShow={showFile} rootPath={rootPath} library={library} onThumbnail={keepPicture} />;
+```
 Declarations are owned here; apps need no ambient shims or aliases into this
 source tree.
 
@@ -139,18 +160,19 @@ same editor as an overlay in both apps.
 Read [drawing](docs/drawing.md) before extending this editor or reusing it for
 viewer annotations.
 
-The required host contract, typed prompt bundles, delivery receipts and named
-renderer slots are documented in [viewer host](docs/viewer-host.md). Clipboard
+The required host contract, typed prompt bundles, delivery receipts and host
+chrome slots are documented in [viewer host](docs/viewer-host.md). Clipboard
 and page reload implementations live in the apps. Shared UI performs no
 raw transport, clipboard discovery, host storage or page-navigation effects.
 
 ## Lifetimes and state
 
 `FileSource` describes storage only: stat/list/search, optional reads and optional
-write/create/rename/duplicate/trash operations. Menus derive storage capabilities
-from these methods and native/copy capabilities from the separate `FileActions`
-port. Missing methods remain unavailable. A web catalog source stays read-only;
-listing never filters entries by renderer support.
+write/create/rename/duplicate/trash operations, and the optional name a copied
+reference gives a file (`referencePath`, else its path under the root). Menus
+derive storage capabilities from these methods and native/copy capabilities from
+the separate `FileActions` port. Missing methods remain unavailable. A web catalog
+source stays read-only; listing never filters entries by renderer support.
 
 Writes return saved, conflict, cancelled or error outcomes; mutations return
 committed receipts, cancellation or typed failures. The desktop validates the
@@ -239,13 +261,17 @@ and versioned, bounded memory cache; it adds no persistent store. Read
 [feature detection](docs/feature-detection.md) before changing inference rules,
 cache identity, cancellation or recognition limits.
 
-A CAD file declares no panel of the nav row: its controls are `ToolPanel`s in the
+A CAD file declares no panel of the navbar: its controls are `ToolPanel`s in the
 tool stack, shown by the tool they belong to. Select shows Features (a robot's Links)
 and, with a selection, the Reference; Position shows Position; Display and Draw show
 their own panels; kept effects (Explode, Clip, Measure's results) follow. A panel
 whose tool is not up stays mounted, hidden, so a tree keeps its scroll and expansion;
-only what is on screen does background work. Issues and SDF metadata are Select's
-panels too. Links is the description's link tree, with the Model tree's rows, filter
+only what is on screen does background work. The tree's X closes it alone (Select stays
+the tool, marked) until a press on Select brings it back; it starts closed for a single
+part and on a phone, open for an assembly, until a person chooses.
+The tree, the Reference and Position are each sized by their own bottom-right grip, Quick
+Edit's. SDF metadata is a Select panel
+too. Links is the description's link tree, with the Model tree's rows, filter
 and Reference panel; see [robot links](docs/cad-renderer.md#robot-links). Which of
 the host's panels a file opens with is the host's to apply
 (`ViewerHost.navigation.openFile(path, { target, panel })`): a file picked in the
@@ -253,10 +279,11 @@ tree asks for the tree, so the tree stays up while a person walks it; any other 
 gets nothing. No panel is saved in a file's record.
 The binding [viewer design system](docs/settings-ui.md) defines tool lifecycle,
 the tool stack, mobile layout, section density, keyboard scope, tooltips
-and preview. RendererShell owns the top-left toolbar, the bottom-right cube and
-the top-right bar: Display settings, then Preview. Preview is the shell's own
-mode, where routines play and the model orbits, and preserves the parent
-navbar. Keep app-specific effects in the
+and preview. RendererShell owns the top-left toolbar, Quick Edit at the top-right,
+the bottom-left cube, and the view's controls it draws into the navbar's right end
+(`navbarSlot`): Display settings, then Preview, after the host's Feedback. Preview is
+the shell's own mode, where routines play and the model orbits, and takes the whole
+page, the navbar with it. Keep app-specific effects in the
 [host contract](docs/viewer-host.md), not in renderer components.
 
 One per-file settings store serves controls, live commands and persistence.
@@ -270,7 +297,11 @@ Model reference section shows their properties. There is no Materials editor or
 persisted material override. See [View styles](docs/render-mode.md) and
 [progressive detail](docs/lod.md).
 
-The navbar names the file and carries compact loading/update status. An error
-appears as a card over the viewport;
-a failed update the model survives can be dismissed, leaving the previous
-version to inspect. Try again reloads only the selected renderer.
+The navbar names the file and offers its ⋯ menu, and Feedback (a new issue titled
+"Feedback: ") where the host has a tracker; a renderer's loading and update status is its
+own, in its viewport. An error appears as a card over the viewport; a failed update the
+model survives can be dismissed, leaving the previous version to inspect, and the card's own
+icon, the leftmost of the navbar's right-hand controls while it is put away, brings it back.
+Retry reloads only the selected renderer; Report Issue, where the host has a tracker, opens a
+new issue titled "Issue: ", labelled `bug`, filled in from the card, with the file's name and
+no path of the machine.

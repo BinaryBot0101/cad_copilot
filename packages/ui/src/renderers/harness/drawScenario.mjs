@@ -88,6 +88,13 @@ export async function runDrawScenario({ page, pane, errors }) {
   assert.equal(afterStroke.projection, locked.projection);
   const stroke = await ink();
   assert.ok(stroke.red > 50, `neon red ink: ${JSON.stringify(stroke)}`);
+  // A sketch begun opens Quick Edit, its header naming the drawing, and it takes the keyboard once
+  // the pen lifts.
+  const quickEdit = pane.getByRole('region', { name: 'Quick Edit', exact: true });
+  assert.equal(await quickEdit.locator('[data-quick-edit-chip="sketch"]').innerText(), 'drawing');
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), 'Describe your changes');
+  // Written, the note keeps it open while the drawing goes on.
+  await quickEdit.getByRole('textbox', { name: 'Describe your changes', exact: true }).fill('Add a boss where the ink is.');
   await settles('Undo', true);
   await settles('Redo', false);
   // Undo and Redo trade places in the history buttons, the one stroke going and coming back.
@@ -171,15 +178,28 @@ export async function runDrawScenario({ page, pane, errors }) {
   await fillsInside();
   assert.equal(await draw.locator('[data-drawing-tool]').getAttribute('data-drawing-tool'), 'fill');
 
-  // The bottom action copies the view with its ink to the host's clipboard, as a PNG.
+  assert.equal(await quickEdit.getByRole('textbox').inputValue(), 'Add a boss where the ink is.', 'the note kept Quick Edit open while the sketch went on');
+
+  // Quick Edit queues the note with the view and its ink for the host, as a PNG; queued, the note
+  // goes with its sketch.
   await page.evaluate(() => {
-    window.__drawingCopies = [];
-    window.cadHarness.a.host.clipboard.writeImage = async pending => { const blob = await pending; window.__drawingCopies.push({ size: blob.size, type: blob.type }); };
+    window.__drawingPrompts = [];
+    const port = window.cadHarness.a.host.promptContext;
+    const originalDeliver = port.deliver;
+    port.deliver = async context => {
+      const image = context.parts.find(part => part.kind === 'attachment');
+      const blob = await image.content;
+      window.__drawingPrompts.push({ size: blob.size, type: blob.type });
+      return originalDeliver(context);
+    };
   });
-  await pane.getByRole('button', { name: /^Copy Drawing/ }).click();
-  await page.waitForFunction(() => window.__drawingCopies.length === 1);
-  const [copied] = await page.evaluate(() => window.__drawingCopies);
-  assert.ok(copied.type === 'image/png' && copied.size > 100, JSON.stringify(copied));
+  assert.equal(await quickEdit.getByRole('textbox').inputValue(), 'Add a boss where the ink is.');
+  await quickEdit.getByRole('button', { name: 'Queue', exact: true }).click();
+  await page.waitForFunction(() => window.__drawingPrompts.length === 1);
+  const [added] = await page.evaluate(() => window.__drawingPrompts);
+  assert.ok(added.type === 'image/png' && added.size > 100, JSON.stringify(added));
+  await quickEdit.waitFor({ state: 'detached' });
+  assert.equal((await ink()).ink, 0, 'the sketch went with the note');
 
   // Leaving Draw ends the session and the sketch with it; the tool and colour in hand wait for the next.
   await pane.getByRole('group', { name: 'Interaction tools' }).getByRole('button', { name: 'Select', exact: true }).click();

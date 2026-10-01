@@ -30,12 +30,13 @@ export interface CadCatalogSnapshot {
   refreshing: boolean;
   error: string;
   rootId: string;
+  /** The server's digest of the last catalog applied ('' before one is): what a change watcher compares. */
+  catalogRevision: string;
 }
 export interface CadRequestOptions { signal?: AbortSignal }
 export interface CadArtifactResult {
   ok?: boolean;
-  state: 'rendered' | 'not-compiled' | 'compiling' | 'failed';
-  catalog?: CadCatalog;
+  state: 'compiled' | 'not-compiled' | 'compiling' | 'failed';
   error?: string;
   [key: string]: unknown;
 }
@@ -94,19 +95,7 @@ export interface CadSurfaceResponse {
   viewId: string; job?: string; replacementView?: CadRuntimeView;
   components: Record<string, {state: 'pending' | 'ready' | 'failed'; surfaceInput: string; surfaceObject?: string; url?: string; byteLength?: number; job?: string; error?: string; code?: string}>;
 }
-export interface CadPreviewGeometry {
-  tree: string;
-  url: string;
-  kind?: string;
-  revision?: number;
-  sequence: number;
-  kinematics?: CadJson;
-  appearance?: CadJson;
-  appearanceHash?: string;
-  animation?: CadJson;
-  animationHash?: string;
-}
-export interface CadSavedArtifact { tree: string; documentHash: string; revision?: number }
+/** What a build of a STEP file is doing: status only. The viewer always shows the saved file. */
 export interface CadEditingPreview {
   feedCursor?: string;
   feedLimited?: boolean;
@@ -119,9 +108,8 @@ export interface CadEditingPreview {
   error?: string;
   output?: string;
   file?: string;
-  previewUnavailable?: boolean;
-  preview?: CadPreviewGeometry | null;
-  saved?: CadSavedArtifact | null;
+  /** The file changed after this build finished: its failure is no longer the news. */
+  superseded?: boolean;
 }
 export interface CadPreviewObserverOptions {
   schedule?: typeof globalThis.setTimeout;
@@ -166,4 +154,9 @@ export interface CadClientOptions {
   pollIntervalMs?: number;
   /** Host visibility policy, evaluated at each polling interval. */
   shouldPoll?: () => boolean;
+  /**
+   * A file's build feed, from a host that already hears it on a call it makes anyway: the
+   * client then asks the preview route nothing. Returns the unsubscribe.
+   */
+  editingPreviewFeed?: (file: string, onUpdate: (preview: CadEditingPreview) => void, onError: (error: unknown) => void) => () => void;
 }

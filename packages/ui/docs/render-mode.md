@@ -180,7 +180,7 @@ state republished unchanged after a runtime replacement does not.
 
 ## Where the controls live
 
-Display settings are a toolbar popover present for every 3D file, never a
-sidebar panel. A file's own Settings panel holds its model tree and Position
+Display settings are a popover from its button among the view's controls in the
+navbar's right end, present for every 3D file, never a sidebar panel. A file's own Settings panel holds its model tree and Position
 (see [settings-ui.md](./settings-ui.md#sidebars-and-mobile)); nothing in it is a
 display setting.

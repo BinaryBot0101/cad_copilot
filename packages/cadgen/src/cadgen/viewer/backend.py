@@ -14,7 +14,8 @@ DIFFERENT statuses: a path outside the root RAISES (403 Forbidden), while a
 path inside it with a hidden root-relative component returns ``True`` and the
 caller answers ``None`` (404 Not found). Only ROOT-RELATIVE components are
 dot-checked, so a served root that itself lives under a hidden absolute path
-still serves.
+still serves. A lazy backend -- a whole filesystem, which serves the files it
+is asked for rather than a directory's contents -- checks no components.
 
 The ordering of those checks decides the status code and is part of the
 contract: the served-extension filter runs BEFORE the containment raise, so
@@ -48,6 +49,7 @@ from .scanner import (
     path_is_inside,
     path_relative,
     scan_cad_directory,
+    scan_cad_files,
     to_posix_path,
 )
 from .store_paths import result_snapshot
@@ -214,7 +216,7 @@ def _absolutize_entry(entry: dict, *, root_path: str, scan_repo_root: str) -> di
 class LocalAssetBackend:
     kind = "local-fs"
 
-    def __init__(self, root: str = ""):
+    def __init__(self, root: str = "", *, lazy: bool = False):
         root_path = os.path.abspath(str(root or "").strip() or os.getcwd())
         if "\0" in root_path:
             raise ValueError("CAD Viewer directory contains an invalid null byte")
@@ -224,6 +226,11 @@ class LocalAssetBackend:
         # both report the spelling the operator gave.
         self.root_path = root_path
         self.root_name = node_basename(root_path)
+        # A lazy backend serves a root too big to walk -- a whole filesystem, from
+        # "/" or a drive -- and never walks it: its catalog is the files it is
+        # asked about, and its folders are listed one at a time. It hides hidden
+        # files, not files under hidden folders: those were opened, not found.
+        self.lazy = lazy
         self._catalog_guard = threading.Lock()
         self._catalog_snapshot = None
         self._catalog_refreshing = False
@@ -333,6 +340,9 @@ class LocalAssetBackend:
             pass
 
     def read_catalog(self, preferred_file=None) -> dict:
+        if self.lazy:
+            ref = normalized_file_ref(preferred_file)
+            return self._absolutize_catalog(scan_cad_files(self.root_path, [ref] if ref else []))
         discovery = scan_cad_directory(self.root_path, defer_unpreferred=True)
         current = self._current_catalog_snapshot(discovery)
         if current is not None:
@@ -359,6 +369,8 @@ class LocalAssetBackend:
         legitimately compile.
         """
         require_contained(self.root_path, candidate)
+        if self.lazy:
+            return False
         relative = path_relative(self.root_path, candidate)
         return any(
             part and part != ".." and part.startswith(".") for part in relative.split(os.sep)

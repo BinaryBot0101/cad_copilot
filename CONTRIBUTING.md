@@ -239,11 +239,12 @@ requested separately. A manual dispatch runs every job.
 | core-js | core, infrastructure | `@text-to-cad/core` and benchmark helper units |
 | web | web, UI, core, cadgen, infrastructure | UI and web units, the UI browser specs, bundled launch, format/camera browser checks through the backend |
 | skills | skills or runtime/host contracts | repo policy; skill CLI suites only for skills, cadgen, core or infrastructure |
+| codex | codex, UI, core, cadgen, infrastructure | the CAD app's host-adapter units (jsdom) and its one-file build |
 | docs | docs, skills, cadgen, core, infrastructure | static asset contract, lint, Next build, icon verification |
-| packaging | cadgen, core, UI, web, infrastructure | clean bundle, wheel contents, installed CLI behavior |
+| packaging | cadgen, core, UI, web, codex, infrastructure | clean bundle, wheel contents, installed CLI behavior |
 
 Here `cadgen`, `core` and `UI` mean their package directories and tests;
-`web` and `docs` mean their app directories. Infrastructure includes
+`web`, `codex` and `docs` mean their app directories. Infrastructure includes
 `scripts/`, `.github/`, the root lockfile/manifests and version/plugin metadata.
 Root prose, manual model changes and `LICENSE` run only Version Check. Skill
 and package Markdown is test input and follows its owning component.
@@ -327,6 +328,10 @@ Canonical source directories are:
   `cadgen.viewer` (in `packages/cadgen`), and its built `dist/` ships inside the
   cadgen wheel as `cadgen/_runtime/viewer` — built at release time, never
   committed.
+- `apps/mcp/` for the CAD app agent hosts render (MCP Apps: Codex, Claude Desktop). Its
+  server is `cadgen mcp` (`cadgen/mcp` in `packages/cadgen`), and its one-file
+  build ships inside the cadgen wheel as `cadgen/_runtime/mcp` — built at
+  release time, never committed.
 - `apps/docs/` for the site.
 - `packages/cadgen/` for the Python distribution and bundled runtime assets.
 - `packages/core/` for non-React CAD/client code.
@@ -359,7 +364,7 @@ imports remain inside its directory.
 
 ## Viewer Development In This Repo
 
-The apps are `docs` and `web`. Framework-independent CAD code lives
+The apps are `docs`, `web` and `codex`. Framework-independent CAD code lives
 in `@text-to-cad/core`; `@text-to-cad/ui` owns the complete FileViewer and injectable
 renderers. Apps consume compiled public exports. Apps never import another app,
 and packages never import apps. `npm run check:boundaries` checks the graph,
@@ -452,6 +457,49 @@ asserts required Node/browser outputs; wheel validation checks the complete
 packaged viewer too. Per-stage `cadgen-runtime.sh` flags are for debugging;
 normal iteration goes through `bundle.sh`.
 
+## CAD In Agent Hosts (Codex, Claude Desktop)
+
+The viewer agent hosts render is `apps/mcp` served by `cadgen mcp`; what it
+does, the two ways hosts present it, and the rules it keeps are in
+[apps/mcp/README.md](apps/mcp/README.md). To run this checkout's build in the
+Codex app:
+
+```bash
+scripts/install/codex-dev-plugin.sh --restart
+```
+
+It builds `apps/mcp`, assembles a plugin under `tmp/codex-dev` (this
+checkout's skills, and a server run by this checkout's `.venv`), installs it as
+`cad@earthtojake-dev` and restarts the app. It refuses while another CAD plugin
+is installed; `--uninstall` removes it. The plugin serves a copy of the page
+taken at install, never `apps/mcp/dist` itself: a rebuild would change the
+page's URI under the running app, and Codex drops the frames showing the old
+one. So reinstall to see a page edit. A running server keeps the Python it
+started with, so restart the app after a Python-only change. The server's
+stderr lands in Codex's log database (`~/.codex/logs_2.sqlite`, lines starting
+`MCP server stderr`).
+
+To run it in Claude Desktop:
+
+```bash
+scripts/install/claude-dev-server.sh
+```
+
+It builds `apps/mcp` and adds a `cad-dev` server to Claude Desktop's
+`claude_desktop_config.json` (every other entry is kept): this checkout's
+`.venv` running `cadgen mcp` over a copy of the page, for the same reason as
+above. Claude Desktop reads the file when it starts, so quit and reopen it (or
+use Developer > Reload MCP Configuration), then ask Claude to show a model with
+CAD. `--uninstall` removes the entry. The server's stderr lands in
+`~/Library/Logs/Claude/mcp-server-cad-dev.log`; the app's developer tools
+(Developer Mode, then Cmd+Option+I) inspect the card's frame.
+
+Neither app can be driven by a test, so the standard path is also checked in
+the MCP Apps reference host (`basic-host` from `modelcontextprotocol/ext-apps`):
+it speaks Streamable HTTP, so a local bridge to the stdio server is needed, and it
+does not advertise the UI extension, so start the server with
+`CADGEN_MCP_PRESENTATION=inline`.
+
 ## Branch Layout
 
 `main` is the source tree, what installers clone, and what releases are cut
@@ -525,6 +573,10 @@ Where the built things live instead:
   exercises it, keeps the distribution as a workflow artifact, uploads it to
   PyPI (the install channel every skill pins against), and attaches that same
   wheel and sdist to the GitHub Release as the provenance copy of what shipped.
+- **The plugin ZIP** (`cad-openai-plugin-<version>.zip`) is the plugin in the
+  layout OpenAI's plugin submission portal takes. It is built from the release
+  commit and attached to the GitHub Release beside the wheel. See [Submitting
+  the plugin to OpenAI](#submitting-the-plugin-to-openai).
 - **A checkout** builds its own: run `scripts/bundle/bundle.sh` once after
   cloning (and after pulling changes to `packages/core`); a missing runtime
   fails with a message that says so.
@@ -555,7 +607,12 @@ is involved) and deletes the branch. The merged commit is THE release commit.
 1. `check-version.sh`, then the gate: `VERSION` must be past the latest release
    tag (either spelling — `scripts/release/release-tags.sh` is the one place
    that knows `v0.5.0` and the bare `0.4.28` before it, and it compares
-   versions, not tag strings), or equal to it with the tag missing.
+   versions, not tag strings), or equal to it with the tag missing. Then
+   `scripts/release/plugin_zip.py` builds the plugin ZIP from the untouched
+   release commit and checks it against the portal's package rules, so a
+   package the portal would refuse stops the release before anything
+   irreversible. The ZIP is kept as a workflow artifact
+   (`cad-openai-plugin-<version>`).
 2. `bundle.sh --clean` — which is where cadgen's whole runtime comes into
    existence, Node builders, snapshot bundle and Viewer client alike, because
    the release commit carries none of it — then `check-builds.sh`, the docs and
@@ -568,10 +625,49 @@ is involved) and deletes the branch. The merged commit is THE release commit.
    artifact (`cadgen-<version>`).
 4. **On `main` only:** PyPI upload (`skip-existing`, so a rerun is a no-op),
    `Deploy Docs`, then the `v<VERSION>` tag and the GitHub Release, with the
-   wheel and sdist from that same artifact attached as release assets (PyPI
-   stays the install channel; the release page is the provenance copy). Nothing is
-   committed or pushed to `main` after the release PR merge: the tag points at
-   the source commit, and `git describe` on `main` is meaningful.
+   wheel and sdist from that same artifact and the plugin ZIP attached as
+   release assets (PyPI stays the install channel; the release page is the
+   provenance copy). Nothing is committed or pushed to `main` after the release
+   PR merge: the tag points at the source commit, and `git describe` on `main`
+   is meaningful.
+
+### Submitting the plugin to OpenAI
+
+The plugin directory shared by ChatGPT and Codex takes plugins only through the
+web portal at <https://platform.openai.com/plugins>. OpenAI documents no API or
+CLI for uploading, submitting or publishing, so CD cannot do it and no secret is
+involved. What CD does is build the file to upload: each GitHub Release carries
+`cad-openai-plugin-<version>.zip`. It holds one top-level `cad/` directory with
+`.codex-plugin/` (manifest and icons), `skills/`, `LICENSE`, and every file the
+manifest points at. The portal requires `mcpServers` to resolve to a root
+`.mcp.json`, so a server config the checkout keeps under another name is
+archived as `.mcp.json`, and the archived manifest points there.
+
+For each release, a person with the access below:
+
+1. Downloads `cad-openai-plugin-<version>.zip` from the release page.
+2. On the Plugins page, opens the CAD plugin, selects **Upload plugin to make
+   changes**, and uploads the ZIP. The first submission uses **Upload new or
+   existing plugin** instead.
+3. Resolves the automated findings, selects **Submit for review**, and completes
+   the policy attestations.
+4. After approval, selects **Publish plugin**.
+
+One-time setup, in the OpenAI Platform organization that owns the plugin:
+complete individual or business verification under
+<https://platform.openai.com/settings/organization/general>. Submitting needs an
+organization owner, or a member granted **Apps Management Write**
+(`api.apps.write`).
+
+`python3 scripts/release/plugin_zip.py --check` runs the same checks locally;
+`--out PATH` also writes the ZIP. `tests/python/global/test_plugin_zip.py` runs
+them on every pull request that touches the plugin. The checks are the portal's
+documented package rules
+([submission errors](https://developers.openai.com/plugins/deploy/submission-errors)),
+with the final-submission listing limits, such as 30 characters for the name and
+subtitle. A missing `interface.logo` or `interface.composerIcon` is a warning,
+not an error, but the portal refuses the upload without them. The portal's own
+skill and policy scans still run after upload.
 
 ### Resuming and republishing
 

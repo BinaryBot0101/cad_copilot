@@ -15,7 +15,6 @@ import {
 } from "@text-to-cad/core/lib/viewer/stageTheme.js";
 import { buildRuntimeInitializationAlert } from "@text-to-cad/core/lib/viewer/webglSupport.js";
 import { THEME_FLOOR_MODES } from "@text-to-cad/core/lib/themeSettings.js";
-import { useViewerMobile } from "../../../file-viewer/responsive.js";
 import ViewPlaneControl from "../camera/ViewPlaneControl.js";
 import { CAD_DEFAULT_VERTICAL_FOV_DEGREES, explicitViewerFocalLength, perspectiveDistanceScale } from "../camera/cameraLens.js";
 import { PREVIEW_AUTO_ROTATE_SPEED } from "../camera/orbitControls.js";
@@ -49,10 +48,11 @@ import { createViewUpdateGate } from "../view-settings/viewUpdateGate.js";
 import { viewerTransitionBackdrop } from "../viewport/framePresentation.js";
 import { IDLE_PIXEL_RATIO_CAP, INTERACTION_IDLE_DELAY_MS, INTERACTION_PIXEL_RATIO_CAP, getPixelRatioCap } from "../viewport/pixelRatio.js";
 import { disposeSceneObject } from "../viewport/sceneObjects.js";
+import { renderThumbnail } from "../viewport/thumbnail.js";
 import { useViewerRuntime } from "../viewport/useViewerRuntime.js";
 import ViewportError from "../status/ViewportError.jsx";
+import { VIEWPORT_CUBE_BOTTOM_PX, VIEWPORT_CUBE_SIZE, VIEWPORT_CORNER_INSET_PX } from "./viewportLayout.js";
 
-const VIEW_PLANE_CONTROL_SIZE = "7rem";
 const STORED_CAMERA_COORDINATES = "cad-z-up-v1";
 /** How long after the open-time fit the viewport and projection may still be settling. */
 const OPEN_FIT_SETTLE_MS = 600;
@@ -69,8 +69,8 @@ function clearGroup(group) {
  * it. The scene stays its renderer's: this component detaches it, never disposes it.
  *
  * The imperative handle is what the shell drives: view settings preparation and
- * presentation, screenshot pixels, the reset that frames the model, framing a
- * given box, and stored perspectives.
+ * presentation, screenshot pixels and a library card's picture, the reset that frames the model,
+ * framing a given box, and stored perspectives.
  */
 const ShellViewport = forwardRef(function ShellViewport({
   scene = null,
@@ -92,6 +92,7 @@ const ShellViewport = forwardRef(function ShellViewport({
   orbitPreview = false,
   previewOrbitSpeed = 1,
   isLoading = false,
+  viewCube = true,
   viewUpdate = null,
   loadingPresentation = null,
   drawingEnabled = false,
@@ -124,7 +125,6 @@ const ShellViewport = forwardRef(function ShellViewport({
   if (scene && !isKitScene(scene)) {
     throw new Error("ShellViewport needs a kit scene: { object3D, bounds, dispose() } (kit/scene.js).");
   }
-  const mobile = useViewerMobile();
   const normalizedSceneScaleMode = normalizeSceneScaleMode(sceneScaleMode);
   const normalizedProjection = normalizeCameraProjection(projection);
   const defaultGridRadius = defaultSceneGridRadius(normalizedSceneScaleMode);
@@ -368,6 +368,17 @@ const ShellViewport = forwardRef(function ShellViewport({
       if (!runtime?.renderer || !runtime?.scene || !runtime?.camera) throw new Error("The viewer is not ready");
       return await buildCompositeScreenshotBlob(runtime, drawingControllerRef.current?.inkCanvas() || null, {
         backgroundColor: resolveElementBackgroundColor(runtime.renderer.domElement)
+      });
+    },
+    // The model on its own, for a library card: framed whole from the default direction at the
+    // card's size, whatever the camera on screen (`kit/viewport/thumbnail.js`).
+    async captureThumbnail({ width, height }) {
+      await viewUpdateBindingRef.current?.whenReady();
+      const runtime = runtimeRef.current;
+      if (!runtime?.renderer || !scene) throw new Error("The viewer is not ready");
+      return renderThumbnail(runtime, {
+        bounds: scene.restBounds || scene.bounds, modelOffset: modelTransformRef.current.offset,
+        sceneScaleMode: normalizedSceneScaleMode, width, height
       });
     },
     activateViewPlaneFace,
@@ -988,17 +999,19 @@ const ShellViewport = forwardRef(function ShellViewport({
       ) : null}
       {drawingOverlayActive ? <DrawingOverlay drawing={drawing} onReady={handleDrawingReady} onContentChange={handleDrawingContent} onViewportChange={followDrawingViewport} /> : null}
       {overlay}
-      {/* The cube is the tools view's: preview has no cube to draw or keep in step with the orbit. */}
-      {!mobile && !previewMode && <div className="pointer-events-none absolute inset-0">
+      {/* The cube is the tools view's: preview has no cube to draw or keep in step with the orbit,
+          a model still loading has none to orient, and a compact view (`viewCube`) has no room. */}
+      {viewCube && !previewMode && !isLoading && <div className="pointer-events-none absolute inset-0">
       <ViewPlaneControl
         showViewPlane
         disabled={drawingOverlayActive}
         isLoading={isLoading}
         meshData={scene}
-        // Close into the corner: the cube's box is larger than the cube, whose labels overhang it.
-        viewPlaneOffsetRight={4}
-        viewPlaneOffsetBottom={12}
-        viewPlaneSize={VIEW_PLANE_CONTROL_SIZE}
+        // Close into the bottom-left corner, under its actions: the cube's box is larger than the
+        // cube, whose labels overhang it.
+        viewPlaneOffsetLeft={VIEWPORT_CORNER_INSET_PX}
+        viewPlaneOffsetBottom={VIEWPORT_CUBE_BOTTOM_PX}
+        viewPlaneSize={VIEWPORT_CUBE_SIZE}
         compact={false}
         activeViewPlaneFace={activeViewPlaneFace}
         viewPlaneFaces={VIEW_PLANE_FACES}

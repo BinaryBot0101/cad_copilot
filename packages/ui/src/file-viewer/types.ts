@@ -44,6 +44,12 @@ export interface FileSource {
   /** Stable workspace/root identity. Connection ports must never be used here. */
   id: string;
   rootName: string;
+  /**
+   * The name a copied reference gives `path`, one of this source's paths. Without it a
+   * reference names the file by `path` itself, relative to this source's root; a root whose
+   * relative paths mean nothing outside the viewer (a whole filesystem) gives the absolute path.
+   */
+  referencePath?: (path: string) => string;
   stat: (path: string, options: { signal: AbortSignal }) => Promise<FileMetadata>;
   list?: (directory: string, options: { signal: AbortSignal }) => Promise<readonly FileEntry[]>;
   paths?: (options: { signal: AbortSignal }) => Promise<readonly string[]>;
@@ -90,8 +96,18 @@ export interface PrepareContext {
   /** This same file was explicitly reloaded or invalidated by its source. */
   refresh?: boolean;
 }
-export interface PreparedDocument<T> { data: T; text?: TextDocument; dispose?: () => void }
-/** Renderer-owned actions shown before the common panel buttons. Never persisted. */
+export interface PreparedDocument<T> {
+  data: T;
+  text?: TextDocument;
+  dispose?: () => void;
+  /**
+   * The document follows its file by itself: a rewritten file reaches the open renderer as an update
+   * (the CAD renderers read a live catalog entry), so the viewer keeps it open when the file's
+   * content changes instead of opening it again, and the model on screen is never taken down for it.
+   */
+  live?: boolean;
+}
+/** Renderer-owned actions shown at the navbar's right, before any declared panel's toggle. Never persisted. */
 export interface FileNavigationAction {
   id: string;
   /** The accessible name. */
@@ -112,14 +128,23 @@ export interface RendererViewProps {
   document: DocumentSession | null;
   /**
    * The open panel id, for a renderer that declares `panels` of its own (the desktop markdown's
-   * source view). The CAD renderers declare none and read none of `openPanel`, `panelSlot` or
-   * `onPanelOpen`: their controls are tool-stack panels, never the host's column.
+   * source view). The CAD renderers declare none and read none of `panelSlot` or `onPanelOpen`:
+   * their controls are tool-stack panels, never the host's column. Their frame reads `openPanel`
+   * only to put its tools out of sight while the explorer (`"tree"`) is open over them.
    */
   openPanel: string;
-  /** Renderer status beside the filename. */
-  navigationStatusSlot?: HTMLElement | null;
   /** The column's box for a declared `"slot"` panel to draw into. */
   panelSlot: HTMLElement | null;
+  /**
+   * The navbar's box for the renderer's own view controls, at its right before the host's version
+   * (the CAD viewer's Display settings and Preview); null where no navbar is drawn.
+   */
+  navbarSlot: HTMLElement | null;
+  /**
+   * The renderer shows its file fullscreen (the CAD viewer's Preview), or no longer does: the
+   * navbar, the explorer and any declared panel step aside while it lasts.
+   */
+  onFullscreenChange: (fullscreen: boolean) => void;
   onPanelOpen: (id: string) => void;
   onReady: (ready: boolean) => void;
   onOpenFile: (path: string, options?: { target: "current" | "new" }) => void;
@@ -148,6 +173,8 @@ export interface PreparedRenderer {
   panels?: (context: PanelContext) => FilePanel[];
   text?: TextDocument;
   dispose?: () => void;
+  /** See `PreparedDocument.live`. */
+  live?: boolean;
 }
 export interface RendererRegistration {
   id: string;
@@ -162,14 +189,23 @@ export interface FileViewerProps {
   renderers: readonly RendererRegistration[];
   state: FileViewerState;
   onStateChange: (next: FileViewerState) => void;
-  leading?: ReactNode;
-  /** Host content before renderer actions in the navbar. */
-  navigationActions?: ReactNode;
   /** Host controls inside the CAD Display popover. */
   displayActions?: ReactNode;
-  /** Override the selected path shown by breadcrumbs and tree, e.g. before a catalog resolves. */
+  /**
+   * Override the selected path the navbar names and the explorer marks, e.g. `null` while a host
+   * catalog is still resolving the requested file. It does not change the requested document.
+   */
   navigationPath?: string | null;
   reveal?: { path: string; directory: boolean; nonce?: number } | null;
   onError?: (error: Error) => void;
-  presentation?: { empty?: ReactNode; loading?: ReactNode; error?: (message: string) => ReactNode };
+  presentation?: {
+    empty?: ReactNode;
+    /**
+     * A host's home, shown for a tab with no file in place of `empty`: a page of its own, with no
+     * navbar over it (it holds the host's links itself).
+     */
+    home?: ReactNode;
+    loading?: ReactNode;
+    error?: (message: string) => ReactNode;
+  };
 }

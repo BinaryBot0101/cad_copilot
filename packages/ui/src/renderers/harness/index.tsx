@@ -51,12 +51,16 @@ function workspace(id: string) {
   const capture = () => request({ captureRequest: { key: Date.now() } });
   const selectReference = (selector: string) => request({ selectReference: { selector, key: Date.now() } });
   const client = createCadClient({ origin: `${location.origin}/${id}`, workspaceId: id, pollIntervalMs: 0 });
+  // A test that gives the root an absolute home (`window.__cadReferenceRoot`) gets a host that names
+  // files by it in copied references, as one whose root is a whole filesystem does.
+  const referenceRoot = (window as unknown as { __cadReferenceRoot?: string }).__cadReferenceRoot;
   const source: FileSource = {
     id, rootName: id,
+    ...(referenceRoot ? { referencePath: (path: string) => `${referenceRoot}/${path}` } : {}),
     stat: async (path) => ({ path, name: path, kind: 'file', size: 400, extension: path.split('.').pop() || '' }),
     list: async () => [{ path: file, name: file, kind: 'file' }]
   };
-  const destination = { kind: 'composer' as const, available: true };
+  const destination = { kind: (window as unknown as { __cadPromptDestination?: 'clipboard' }).__cadPromptDestination || 'composer' as const, available: true };
   const host: ViewerHost = { files: source, navigation: { openFile(path) { opened.push(path); } }, environment: { colorScheme: 'dark', platform: keyboardPlatform },
     clipboard: { writeText: async () => {}, readText: async () => '', writeImage: async () => {} },
     promptContext: { getSnapshot: () => destination, subscribe: () => () => {}, deliver: async context => {

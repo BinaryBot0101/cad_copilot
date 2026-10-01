@@ -29,3 +29,10 @@ node scripts/brand/render-loading-icon.mjs
 The script reads the pinned Git source, so later changes to the PR do not
 silently change the brand. Normal viewer and desktop builds consume these
 checked-in images and need neither Git access nor the rendering tools.
+
+# CAD mark
+
+`logo-cad.svg` (the home page's and the version menu's wordmark) is the blue relief
+mark `scripts/brand/generate-logos.mjs` generates for the docs site's brand folder;
+the generator writes this copy too, so every app draws the same mark from this
+package. Regenerate it with the brand recipe rather than editing it by hand.

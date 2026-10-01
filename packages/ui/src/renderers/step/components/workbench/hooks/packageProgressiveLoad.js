@@ -123,6 +123,41 @@ export function meshStateIsComplete(meshState) {
   return !(Array.isArray(missing) && missing.length > 0);
 }
 
+// A rewritten file whose next revision is not built yet: the entry has no mesh while its render
+// artifact (re)builds, and the complete model of this same file is the one on screen. It stays
+// there, reported as an update, until the new revision replaces it atomically
+// (`shouldRetainCompleteSameFileMesh`): once a model has been shown, a rebuild never takes it down.
+export function awaitingSameFileRevision(current, entry) {
+  return Boolean(entry?.file) &&
+    String(current?.file || "") === String(entry.file) &&
+    meshStateIsComplete(current);
+}
+
+// What the viewer SHOWS while a same-file revision loads, whatever the entry's kind: the complete
+// model on screen until the new one is published. (`shouldRetainCompleteSameFileMesh` is the
+// loader's own, narrower question: whether to stage an assembly's replacement atomically.)
+export function replacingSameFileMesh(current, entry, targetMeshHash) {
+  return String(current?.file || "") === String(entry?.file || "") &&
+    String(current?.meshHash || "") !== String(targetMeshHash || "") &&
+    meshStateIsComplete(current);
+}
+
+// Whether the model on screen stays while `entry`'s revision loads: through the rebuild, while the
+// entry has no mesh yet, and through the load of its new mesh. Whatever the model is -- a part, an
+// assembly, one with motion -- an edit is an update, never the loading screen again.
+export function retainsPreviousStepMesh(current, entry, { entryHasMesh, meshHash }) {
+  return entryHasMesh
+    ? Boolean(meshHash) && replacingSameFileMesh(current, entry, meshHash)
+    : awaitingSameFileRevision(current, entry);
+}
+
+// What stays on screen when a load is cancelled part-way (a newer revision, or another file):
+// the partial composition that load published for its file goes, a complete model -- a part's as
+// much as an assembly's -- stays, and another file's state is not the cancelled load's to touch.
+export function meshStateAfterCancelledLoad(current, cancelledFile) {
+  return current && current.file === cancelledFile && !meshStateIsComplete(current) ? null : current;
+}
+
 export function shouldRetainCompleteSameFileMesh(current, entry, targetMeshHash) {
   return String(entry?.kind || "") === "assembly" &&
     String(current?.file || "") === String(entry?.file || "") &&

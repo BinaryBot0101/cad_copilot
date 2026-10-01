@@ -15,6 +15,8 @@ step; nothing else belongs here (one-off helpers go in `tmp/`).
 | Check the shipping contract | `scripts/github-workflows/check-builds.sh` |
 | Install local skills into agents | `scripts/install/install-skills.sh --agent codex` |
 | Uninstall local skill links | `scripts/install/uninstall-skills.sh --agent codex` |
+| Run this checkout as the CAD plugin in the Codex app | `scripts/install/codex-dev-plugin.sh --restart` |
+| Run this checkout's CAD server in Claude Desktop | `scripts/install/claude-dev-server.sh` |
 
 ## Index
 
@@ -28,14 +30,15 @@ where those files ship, so these scripts are what produces them.
   metadata (which IS committed) rather than writing it. `--clean` removes the
   `_runtime` tree first. Called by `test.yml`, `release-publish.yml`,
   `check-builds.sh`, the pre-commit hook.
-- `cadgen-runtime.sh` — builds the four runtime stages: `--node` (esbuilt Node
+- `cadgen-runtime.sh` — builds the five runtime stages: `--node` (esbuilt Node
   builders), `--browser` (snapshot browser bundle), `--viewer` (vite build of
-  `apps/web`), `--native` (the file tracer, zig-compiled for every platform;
-  `--native-host` builds this machine's only). `--print-outputs` lists the three
-  directories a bundle always produces; `--check` skips the viewer stage, which
-  needs the client's `node_modules` and which nothing in a checkout reads. Called
-  by `bundle.sh`, `check-builds.sh`, `test/test-installed.sh`, and
-  `test/common.sh` when a test runner finds a stage it needs missing; pinned by
+  `apps/web`), `--mcp` (vite build of `apps/mcp`, one `index.html`), `--native`
+  (the file tracer, zig-compiled for every platform; `--native-host` builds this
+  machine's only). `--print-outputs` lists the three directories a bundle always
+  produces; `--check` skips the viewer and MCP stages, which need the apps'
+  `node_modules` and which nothing in a checkout reads. Called by `bundle.sh`,
+  `check-builds.sh`, `test/test-installed.sh`, and `test/common.sh` when a test
+  runner finds a stage it needs missing; pinned by
   `tests/python/global/test_node_builder_bundles.py` and
   `test_js_runtime_reproducibility.py`. Call it directly only to debug one stage.
 - `lib/node_builders.sh`, `lib/snapshot_runtime.sh` — sourced by
@@ -47,9 +50,10 @@ where those files ship, so these scripts are what produces them.
 - `test.sh` — `test-js.sh`, then `test-python.sh`, then `test-global.sh`: the
   whole tree on one machine. Called by `release-publish.yml`; `test.yml` calls
   the focused runners per job instead.
-- `test-js.sh [--select core|ui|web|all]` — builds the required shared exports,
+- `test-js.sh [--select core|ui|web|codex|all]` — builds the required shared exports,
   checks dependency boundaries and runs the selected shared JS/UI/web suites.
-  Core includes the pure `bench/viewer-memory/` helper units.
+  Core includes the pure `bench/viewer-memory/` helper units; `codex` also builds
+  the CAD app, whose one-file build is half its contract.
 - `test-python.sh [--keep-going] [--select GROUP] [--print-weights]`
   — the cadgen package suite, then every skill's suite. Each test FILE runs in
   its own interpreter against its own temporary store, `CADGEN_TEST_JOBS` at a
@@ -77,8 +81,8 @@ where those files ship, so these scripts are what produces them.
   first. Called by `test.yml` and `release-publish.yml`.
 - `test-installed.sh` — builds the wheel (or accepts `--wheel PATH` to test
   the exact artifact already built), installs it into a scratch venv and
-  exercises cadgen from outside the repo. Called by `test.yml` and
-  `release-publish.yml`.
+  exercises cadgen from outside the repo, including `cadgen mcp` serving the
+  packaged CAD app over stdio. Called by `test.yml` and `release-publish.yml`.
 - `test-viewer-launch.sh` — launches `cadgen viewer` against the built client and
   verifies reuse, cold STEP import, display derivation and browser drawing using
   a tiny test-owned STEP. Called by `test.yml`.
@@ -114,6 +118,12 @@ where those files ship, so these scripts are what produces them.
   `_runtime/{node,browser,viewer}` are inside it, with bytes identical to the
   bundled source. The only gate on package data, which fails quietly. Called by
   `test.yml` and `release-publish.yml`.
+- `plugin_zip.py --out PATH | --check` — builds the plugin ZIP OpenAI's plugin
+  submission portal takes (`cad/` holding `.codex-plugin/`, `skills/`,
+  `LICENSE` and every file the manifest names, with the MCP config as the root
+  `.mcp.json`) and checks it against the portal's documented package rules.
+  Called by `release-publish.yml`; tested by
+  `tests/python/global/test_plugin_zip.py`.
 - `publish-github-release.sh [--target REF] [--dry-run] [--publish]` — creates and
   pushes the `v<VERSION>` tag and the GitHub Release (a draft unless
   `--publish`). Called by `release-publish.yml`; a local run on the merged release
@@ -138,6 +148,14 @@ where those files ship, so these scripts are what produces them.
 - `install-skills.sh`, `uninstall-skills.sh` — symlink `skills/*` into an agent's
   skill directory (`--agent codex|claude|...`, `--all`, `--dry-run`). Developer
   step in `CONTRIBUTING.md`.
+- `codex-dev-plugin.sh` — builds `apps/mcp` and installs this checkout into the
+  Codex app as `cad@earthtojake-dev` (skills copied, server run by `.venv`,
+  serving a copy of the page taken at install); `--restart` reopens the app,
+  `--uninstall` removes it. Developer step in `CONTRIBUTING.md` ("CAD In Agent Hosts").
+- `claude-dev-server.sh` — builds `apps/mcp` and adds this checkout's `cadgen mcp`
+  to Claude Desktop's config as `cad-dev` (serving a copy of the page);
+  `--uninstall` removes it. Developer step in `CONTRIBUTING.md` ("CAD In Agent
+  Hosts").
 
 `git-hooks/pre-commit` — the body `.githooks/pre-commit` runs: `bundle.sh --check`
 when staged paths touch `packages`, `apps`, `skills` or `scripts/bundle`. It is
@@ -159,7 +177,7 @@ manual; their `*.test.mjs` helper units run in `test-js.sh`.
 | -------- | --------------- | ------- |
 | `test.yml` | pushes to `main`; PRs to `main`; manual dispatch | One job per thing that has to work, each conditional on the paths that can break it (`CONTRIBUTING.md` documents the graph): `Version Check` always; the cadgen package suite on Linux and Windows; `core-js` (`@text-to-cad/core`), `web` (shared UI and the web app), skills and docs on Linux; `packaging` bundles from clean (nothing under `_runtime/` is committed, so this is where it comes from), checks the layout, inspects the wheel and runs the installed-mode tests. Superseded PR runs are cancelled. |
 | `release-prepare.yml` (`Prepare Release`) | manual dispatch | The version bump as a PR: bumps `VERSION`, stamps metadata and skill pins, opens `release/X.Y.Z` against `target` (default `main`; `build-test` rehearses) and merges it. The merge is what runs `Publish Release`. |
-| `release-publish.yml` (`Publish Release`) | pushes to `main` and `build-test`; manual dispatch (resume/republish the head) | Gate (VERSION past the latest tag, or untagged), bundle, tests, wheel build, an `unzip -l` assertion that the shipping wheel carries `_runtime`, install test, distribution artifact; then — on `main` only — PyPI upload, docs deploy, `v<VERSION>` tag and GitHub Release carrying the wheel and sdist. On `build-test` it prints what it would have tagged and stops. |
+| `release-publish.yml` (`Publish Release`) | pushes to `main` and `build-test`; manual dispatch (resume/republish the head) | Gate (VERSION past the latest tag, or untagged), bundle, tests, wheel build, an `unzip -l` assertion that the shipping wheel carries `_runtime`, install test, distribution artifact, and the checked OpenAI plugin ZIP (built first, from the untouched release commit); then — on `main` only — PyPI upload, docs deploy, `v<VERSION>` tag and GitHub Release carrying the wheel, sdist and plugin ZIP. On `build-test` it prints what it would have tagged and stops. |
 | `deploy-docs.yml` (`Deploy Docs`) | manual dispatch; called by `release-publish.yml` | Deploys the docs app to Vercel production from a ref (default `main`): configures Vercel Authentication for preview deployments only, runs `vercel pull/build/deploy --prod`, and verifies the public production URLs. |
 
 `Prepare Release` bumps, `Publish Release` ships, `Deploy Docs`

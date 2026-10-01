@@ -42,7 +42,7 @@ const HARNESS_SIZE = '<style>#root > div { width: 800px !important; height: 500p
 let temporary, server, browser;
 before(async () => {
   temporary = await mkdtemp(join(tmpdir(), 'text-to-cad-glb-browser-'));
-  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl' } });
+  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl', '.svg': 'dataurl' } });
   const bundle = await readFile(join(temporary, 'harness.js'));
   const css = await readFile(new URL('../../../dist/styles.css', import.meta.url));
   server = createServer((request, response) => {
@@ -94,7 +94,7 @@ const ready = pane => pane.locator('[aria-busy="false"] > div > canvas').first()
 // A GLB has no tools; its Display settings are the button beside Preview.
 const noTools = async (pane) => {
   assert.equal(await pane.getByRole('group', { name: 'Interaction tools' }).count(), 0, 'a static GLB has no tools, so no strip');
-  assert.equal(await pane.getByRole('button', { name: 'Display settings', exact: true }).count(), 1, 'its Display settings are the button beside Preview');
+  assert.equal(await pane.getByRole('button', { name: 'Settings', exact: true }).count(), 1, 'its Display settings are the button beside Preview');
   for (const name of ['Orbit', 'Draw', 'Select', 'Measure', 'Position', 'Animate']) {
     assert.equal(await pane.getByRole('button', { name, exact: true }).count(), 0, name);
   }
@@ -171,13 +171,13 @@ test('a static GLB opens on its native scene with no tools: display settings, or
   // Nothing of a GLB picks, measures, poses or is drawn on: the viewport simply
   // orbits, pans and zooms, with no strip over it.
   await noTools(pane);
-  assert.equal(await pane.getByRole('button', { name: /Copy|Add to prompt/i }).count(), 0, 'no copy-references action');
+  assert.equal(await pane.locator('[data-quick-edit]').count(), 0, 'Quick Edit is a STEP file\'s: a GLB has nothing to pick');
 
   // A GLB has no panel of its own: its only settings are Display's, and Display is never
   // where a file opens. So it opens with the column shut and the model given the room.
   assert.deepEqual(await panels(pane), ['Show files:false']);
   assert.equal(await pane.locator('[data-tool-panel]').count(), 0, 'nothing in the tool stack');
-  await pane.getByRole('button', { name: 'Display settings', exact: true }).click();
+  await pane.getByRole('button', { name: 'Settings', exact: true }).click();
   await pane.page().locator('[data-display-popover]').waitFor();
   assert.deepEqual(await panels(pane), ['Show files:false']);
   const displayMenu = page.locator('[data-display-popover]');
@@ -188,7 +188,7 @@ test('a static GLB opens on its native scene with no tools: display settings, or
   await page.keyboard.press('Escape');
   assert.equal(await displayMenu.getByRole('heading', { name: 'Surfaces', exact: true }).count(), 1);
   for (const section of ['Edges', 'Cross-section', 'Explode']) assert.equal(await displayMenu.getByRole('heading', { name: section, exact: true }).count(), 0, section);
-  await pane.getByRole('button', { name: 'Display settings', exact: true }).click();
+  await pane.getByRole('button', { name: 'Settings', exact: true }).click();
   await pane.page().locator('[data-display-popover]').waitFor({ state: 'detached' });
   // The column closing reaches the scene as a resize; let that frame land before comparing pictures.
   await page.waitForFunction(() => document.querySelector('[data-testid="one"] [aria-busy] > div > canvas').width >= 790);
@@ -272,8 +272,8 @@ test('a static GLB opens on its native scene with no tools: display settings, or
   assert.equal(await page.getByRole('menu').count(), 0);
   assert.deepEqual(await page.evaluate(() => window.nativeMenu), [true]);
 
-  // The navbar snapshot goes through the prompt port.
-  await pane.getByRole('button', { name: 'Take snapshot', exact: true }).click();
+  // A host's capture request goes through the prompt port: the view, of the whole file.
+  await page.evaluate(() => window.cadHarness.capture());
   await page.waitForFunction(() => window.cadHarness.captures.length === 1);
   const captured = await page.evaluate(() => window.cadHarness.captures[0]);
   assert.deepEqual([captured.file, captured.type, captured.references.length], ['static.glb', 'image/png', 1]);
@@ -350,8 +350,8 @@ test('an animated GLB opens at rest, plays in preview, and leaving preview puts 
   assert.deepEqual(await page.evaluate(() => window.__cadStage().studioGround), floor);
 
   // Preview orbits every GLB: the Orbit this file's record turned off is one tick away in
-  // Playback settings, and ticked, the preview camera turns.
-  await pane.getByRole('toolbar', { name: 'Animation playback' }).getByRole('button', { name: 'Playback settings', exact: true }).click();
+  // Playback settings, in the view's top-right corner, and ticked, the preview camera turns.
+  await pane.locator('[data-preview-corner]').getByRole('button', { name: 'Playback settings', exact: true }).click();
   const orbit = page.getByRole('menuitemcheckbox', { name: 'Orbit', exact: true });
   assert.equal(await orbit.getAttribute('aria-checked'), 'false', "the file's choice");
   const held = await page.evaluate(() => window.__cadCamera().position);
@@ -368,6 +368,9 @@ test('a corrupt GLB raises the viewer\'s load alert, with reload and details', a
   await alert.waitFor();
   assert.match(await alert.innerText(), /Couldn’t load the model/);
   assert.match(await alert.innerText(), /broken\.glb/);
-  await noTools(pane);
+  // Nothing on screen is the file's to work on: the card alone, with no tools or view actions.
+  for (const name of ['Settings', 'Preview']) {
+    assert.equal(await pane.getByRole('button', { name, exact: true }).count(), 0, `no ${name} over a failed load`);
+  }
   void page;
 });

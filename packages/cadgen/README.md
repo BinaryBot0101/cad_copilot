@@ -10,9 +10,11 @@ platform.
 
 **PURPOSE** — the engine and its command surface: model execution, the
 store, document assembly, kinematics, exports, validation, inspection,
-snapshots, the warm daemon and its build pool, and the CAD Viewer
+snapshots, the warm daemon and its build pool, the CAD Viewer
 (`cadgen viewer`: a local HTTP server over the built client, one directory per
-instance).
+instance), and CAD beside an agent's chat (`cadgen mcp`: an MCP App server that
+an agent host starts, over the viewer's own routes: tabs in Codex, viewer cards
+in the chat for every other MCP Apps host).
 
 **MAY DEPEND ON** — the Python ecosystem it declares (OCP/build123d lazily,
 never at namespace-import time) and the bundled runtime.
@@ -68,7 +70,7 @@ this one:
 
 | Mechanism | What it must not break | Specified in |
 |---|---|---|
-| Editing previews: an explicit session consumes the immutable preview tree an active build announces, before STEP persistence | saved-artifact read-back; no reader reaches source, closure or a model record | [`STORE.md`](STORE.md) §9b |
+| Build status: the viewer's feed says whether a build of a file is running or failed, never what it previews; the viewer shows the saved file | saved-artifact read-back; no reader reaches source, closure or a model record | [`STORE.md`](STORE.md) §9b |
 | Composition: what a decorated call returns, what a parent may consume before a child's save, and when an exact `Compound(children=[...])` keeps its children's pins | the link/component decision, declared-output completion, `isinstance(root, Compound)` | [`STORE.md`](STORE.md) §6, §9a |
 | Display surfaces: canonical trees pin encoded BREP and effective intrinsic face colors; SURF extraction is an artifact-only build-pool job under an attested producer | geometry completeness stays separate from display readiness — `read_step`, STEP re-emits and parent materialization never wait for SURF | [`STORE.md`](STORE.md) §2 |
 
@@ -231,8 +233,8 @@ path.
 
 Kinematics is pure data and choreography is pure JS, fully independent
 (11). Clients render from file + sidecar + the store's artifact side and never
-read source, a record, or trigger source builds (12). An explicit editing
-session may consume runtime-announced preview trees as specified in STORE §9b.
+read source, a record, or trigger source builds (12). A build's status
+(STORE §9b) carries no geometry: clients render the saved file.
 Correctness never depends on a
 store hit (13). Composition: importing binds, calling links — a parent
 depends on a child by its RESULT (the pinned tree) and on what importing it
@@ -368,22 +370,29 @@ src/cadgen/
                          #   cli_from_function, doors (documents by bytes),
                          #   source_sidecar, step_assemble/step_reemit
   viewer/                # the CAD Viewer's server: launcher (main),
-                         #   routes (http_app), catalog (scanner), status
+                         #   routes (http_app), catalog (scanner), the model
+                         #   library every CAD view shares (recents), status
                          #   (artifact_status: not compiled / compiling /
                          #   compiled / failed), build_progress (the daemon's
                          #   job ledger, read over its socket)
+  mcp/                   # CAD for agent hosts: stdio JSON-RPC (protocol), the
+                         #   tools and launches (server), open views (views),
+                         #   the viewer routes in-process (tunnel), roots,
+                         #   the page (ui), and the CAD Viewer link for
+                         #   a host that renders no MCP Apps (browser)
   _runtime/              # BUILT JS (browser snapshot renderer, node
-                         #   builders, the viewer client) and the native file
-                         #   tracer, one library per platform — produced when
-                         #   the wheel is packaged, never committed, never edited
+                         #   builders, the viewer client, the MCP app page)
+                         #   and the native file tracer, one library per
+                         #   platform — produced when the wheel is packaged,
+                         #   never committed, never edited
 ```
 
 Verbs by format: `step` compile · build · snapshot;
 `stl`/`3mf`/`glb` build · snapshot; `dxf` snapshot; `urdf`/`sdf`
 validate · snapshot; `srdf` validate. `cadgen snapshot` routes any suffix.
-`cadgen store|daemon|doctor` are status commands, and `cadgen viewer
-[list|stop]` the CAD Viewer's launcher and instance manager — all deliberately
-outside the mirror pattern. `cadgen step compile` is internal tooling: skills never
+`cadgen store|daemon|doctor` are status commands, `cadgen viewer
+[list|stop]` the CAD Viewer's launcher and instance manager, and `cadgen mcp`
+the server an agent host starts — all deliberately outside the mirror pattern. `cadgen step compile` is internal tooling: skills never
 teach it — doors compile a document's missing tree on demand.
 
 Developed in [earthtojake/text-to-cad](https://github.com/earthtojake/text-to-cad);
@@ -394,3 +403,11 @@ The viewer exposes `POST /__cad/clipboard` for explicit viewport PNG copies. It
 uses the same host and custom-header POST gates as other mutation routes, limits
 images to 20 MiB, and delegates native delivery to `viewer/clipboard.py`. It never
 reads the clipboard. Unsupported desktop clipboard environments return an error.
+
+It exposes `POST /__cad/sketches?name=` for a picture a copied prompt names by path:
+the view with a person's sketch drawn over it. It takes a PNG of at most 20 MiB under
+the same gates and saves it in the system's temporary directory as
+`cadgen-sketches/<name-stem>-<sha256[:12]>.png` (the same picture saved twice is one
+file, and saving it again makes it the newest), keeps only the newest 64
+(`viewer/sketches.py`), and answers `{"ok": true, "path": "<absolute path>"}`. It is
+scratch, not state.

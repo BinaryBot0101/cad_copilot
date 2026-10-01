@@ -24,7 +24,8 @@ any branch but `release/*`. Releases are two GitHub Actions workflows:
   the distribution as a workflow artifact, then — on `main` only — uploads to
   PyPI, deploys the docs site, and tags (`v<VERSION>`; releases before 0.5.0
   are bare `0.4.x` tags) + GitHub-Releases that same merged commit with the
-  wheel and sdist that went to PyPI attached as release assets.
+  wheel and sdist that went to PyPI attached as release assets, plus the
+  plugin ZIP that a person uploads to OpenAI's plugin portal, which has no API.
 
 When asked to publish, make, or ship a release, dispatch `Prepare Release` on
 `main`. Never pick the semver bump yourself: if the request does not name patch,
@@ -58,6 +59,7 @@ for the full flow, the resume path, the rehearsal, and local/manual fallbacks.
   root is the plugin package; its skills are `skills/` directly.
 - `models/`: sample and durable CAD/robot-description fixtures.
 - `apps/web/`: the CAD Viewer's React client (its backend is `cadgen.viewer`).
+- `apps/mcp/`: the CAD app agent hosts render: tabs in Codex, cards in Claude Desktop (its server is `cadgen mcp`).
 - `packages/core`: `@text-to-cad/core`, shared CAD/runtime/client code without React.
 - `packages/ui`: `@text-to-cad/ui`, the shared FileViewer, renderers, controls and styles.
 - `packages/cadgen`: the published distribution — STEP/GLB/topology generation,
@@ -206,7 +208,7 @@ when touching shared surfaces or before handoff:
 - Focused runners: `scripts/test/test-js.sh`, `scripts/test/test-docs.sh`,
   `scripts/test/test-python.sh`, `scripts/test/test-global.sh`.
   `test-python.sh` takes `--select cadgen|viewer|skills|all` and
-  `--print-weights`; `test-js.sh` takes `--select core|ui|web|all`. See
+  `--print-weights`; `test-js.sh` takes `--select core|ui|web|codex|all`. See
   `scripts/README.md`.
 - In GitHub Actions, `test.yml` runs one conditional job per concern. The graph,
   stable required check names and workspace install recipes are in

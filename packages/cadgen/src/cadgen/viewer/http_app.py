@@ -32,10 +32,11 @@ from hashlib import sha256
 from pathlib import Path
 
 from . import reload as dev_reload
-from .backend import ForbiddenAssetError, LocalAssetBackend
+from .backend import ForbiddenAssetError, LocalAssetBackend, normalized_file_ref
 from .cadgen_ops import create_cadgen_ops
 from .content_types import content_type_for_static_asset
 from .encoding import UriError, strict_decode_uri_component
+from .scanner import catalog_lists, path_is_inside
 from .store_paths import virtual_store_asset
 from .tess_cache import (
     TESS_CACHE_METADATA_MAX_BYTES, parse_tess_cache_admission,
@@ -57,6 +58,8 @@ __all__ = [
 
 POST_GUARD_HEADER = "x-cadgen-viewer"
 LOCAL_SERVER_FEATURES = ["path-directory", "reveal-path"]
+# A thumbnail travels as base64 in the change's JSON: 512 KiB of PNG, and room for the rest.
+_LIBRARY_BODY_LIMIT = 768 * 1024
 _LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 
 TESS_CACHE_ROUTE_PREFIX = "/__tess_cache/"
@@ -215,6 +218,11 @@ def _is_ascii_digits(value: str) -> bool:
     return bool(value) and value.isascii() and value.isdigit()
 
 
+def catalog_revision(entries) -> str:
+    """A digest of a catalog's entries: it moves whenever anything a client would see in them does."""
+    return hashlib.sha256(json.dumps(entries, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
+
+
 class CadApp:
     """``handle(request, response)`` writes exactly one response.
 
@@ -223,11 +231,11 @@ class CadApp:
     prefixes, so nothing else can be waiting behind this.
     """
 
-    def __init__(self, *, root: str, host: str, port: int, dist_dir: str = ""):
+    def __init__(self, *, root: str, host: str, port: int, dist_dir: str = "", lazy: bool = False):
         from .surfaces import SurfaceSubscribers
 
         self.surface_subscribers = SurfaceSubscribers()
-        self.backend = LocalAssetBackend(root)
+        self.backend = LocalAssetBackend(root, lazy=lazy)
         root_path = self.backend.root_path
         self.root_path = root_path
         self.root_name = self.backend.root_name
@@ -255,6 +263,7 @@ class CadApp:
         self.started_at = time.time()
         self.lock = threading.Lock()
         self.ops = create_cadgen_ops(root_path)
+        self._recents = None
 
     # --- development auto-reload accounting -------------------------------
 
@@ -264,8 +273,9 @@ class CadApp:
             return self._busy_requests
 
     def restart_is_safe(self) -> bool:
-        """``SourceReloader``'s idle gate: nothing this restart would destroy."""
-        return self.busy_requests() == 0
+        """``SourceReloader``'s idle gate: nothing this restart would destroy -- no request
+        in flight, and no compile the build route started and left running."""
+        return self.busy_requests() == 0 and not self.ops.client.any_in_flight()
 
     # --- server info ------------------------------------------------------
 
@@ -302,9 +312,11 @@ class CadApp:
         }
 
     def read_catalog(self, preferred_file=None) -> dict:
-        """The backend catalog plus this connection's stable root identity."""
+        """The backend catalog plus this connection's stable root identity, and its revision: a
+        digest of the entries, which a client that only watches for change compares instead of
+        reading the catalog again."""
         catalog = self.backend.read_catalog(preferred_file)
-        return {**catalog, "rootId": self.root_id}
+        return {**catalog, "rootId": self.root_id, "revision": catalog_revision(catalog.get("entries", []))}
 
     # --- gates ------------------------------------------------------------
 
@@ -439,7 +451,7 @@ class CadApp:
                     from .preview import preview_update
 
                     response.send_json(200, preview_update(
-                        self.backend.root_path, query.get("file") or "", after=query.get("after")
+                        self.backend.root_path, query.get("file") or "", after=query.get("after"), lazy=self.backend.lazy
                     ))
                 elif pathname == "/__cad/drawing":
                     self._handle_drawing(request, response, query)
@@ -469,6 +481,11 @@ class CadApp:
             try:
                 if pathname == "/__cad/artifact":
                     self._handle_artifact_build(request, response, query)
+                elif pathname == "/__cad/recents":
+                    if int(request.headers.get("content-length") or 0) > _LIBRARY_BODY_LIMIT:
+                        response.send_empty(413, [("connection", "close")])
+                        return
+                    self._handle_library_change(request, response)
                 elif pathname == "/__cad/reveal":
                     from .reveal import reveal_path
                     if int(request.headers.get("content-length") or 0) > 8192:
@@ -486,6 +503,13 @@ class CadApp:
                         return
                     copy_png(request.body())
                     response.send_empty(204)
+                elif pathname == "/__cad/sketches":
+                    # A Quick Edit's sketch, saved for a copied prompt to name (`sketches.py`).
+                    from .sketches import MAX_PNG_BYTES as MAX_SKETCH_BYTES, save_sketch
+                    if int(request.headers.get("content-length") or 0) > MAX_SKETCH_BYTES:
+                        response.send_empty(413, [("connection", "close")])
+                        return
+                    response.send_json(200, {"ok": True, "path": save_sketch(request.body(), str(query.get("name") or ""))})
                 elif pathname == "/__cad/surfaces":
                     if int(request.headers.get("content-length") or 0) > 128 * 1024:
                         response.send_empty(413, [("connection", "close")])
@@ -522,6 +546,48 @@ class CadApp:
         # dispatch ever runs.
         response.send_empty(405, [("allow", "GET, HEAD, POST")])
 
+    # --- the model library -------------------------------------------------
+
+    @property
+    def recents(self):
+        """The one library every CAD view writes (``recents.py``), read lazily."""
+        if self._recents is None:
+            from .recents import RecentStore
+
+            self._recents = RecentStore()
+        return self._recents
+
+    def _library_path(self, ref) -> str:
+        """The absolute path of a model in this Viewer's catalog, from the ``file`` a page sends."""
+        normalized = normalized_file_ref(ref)
+        if not normalized:
+            raise ValueError("name the model by its file")
+        root = self.backend.root_path
+        path = os.path.abspath(normalized if os.path.isabs(normalized) else os.path.join(root, normalized))
+        if not (path == root or path_is_inside(path, root)):
+            raise ForbiddenAssetError()
+        if not catalog_lists(root, path):
+            raise ValueError("that is not a model this viewer lists")
+        return path
+
+    def _handle_library_change(self, request, response):
+        """Record a model this Viewer opened, or keep its picture, for every CAD view's library."""
+        from .recents import thumbnail_png
+
+        payload = json.loads(request.body())
+        if type(payload) is not dict:
+            raise ValueError("a library change is {action, file}")
+        action, path = payload.get("action"), self._library_path(payload.get("file"))
+        if action == "open":
+            if not os.path.isfile(path):
+                raise ValueError("no such model")
+            self.recents.opened(path)
+        elif action == "thumbnail":
+            self.recents.thumbnail(path, thumbnail_png(payload.get("png")))
+        else:
+            raise ValueError(f"unknown library action {action!r}")
+        response.send_json(200, {"ok": True})
+
     # --- placeholders filled by later steps of the port -------------------
 
     def _handle_catalog(self, request, response):
@@ -552,36 +618,19 @@ class CadApp:
         response.send_json(200, {**status, "ref": self._entry_ref_for_status(file_ref)})
 
     def _handle_artifact_build(self, request, response, query):
-        """``ref`` and ``catalog`` both come from ONE post-build scan.
+        """Start the document's compile and answer at once.
 
-        The Node backend scanned twice and disagreed with itself: ``ref`` came
-        from a scan taken BEFORE the build and ``catalog`` from one taken after,
-        so a cold import answered with a ref pointing at the pre-import URL —
-        no ``&v=`` cache-buster — while the catalog it shipped in the same body
-        carried the post-import one. DECIDED, deliberately, to keep the port's
-        post-build ref rather than restore that: the import is precisely the
-        event that changes this entry's URL, and two fields of one payload
-        describing two different moments is a bug that happened to be
-        unobserved (no client reads ``ref`` today) rather than a contract.
-
-        Folding both onto a single scan is the other half of the decision. Node
-        paid for two full directory walks per build POST; this pays for one, and
-        it is the one that makes the two fields agree by construction rather
-        than by care.
+        The compile is a job in the pool; this request is never held for its
+        length (a host relaying requests through a few shared slots would lose
+        one for that long). The answer is ``compiling``, and the client follows
+        the job through the status route -- its progress, then ``compiled``, or
+        ``failed`` with the job's own reason -- and reads the catalog again when it
+        ends. An entry that needs no compile answers ``compiled`` at once.
         """
         file_ref = query.get("file") or ""
         # Only the literal string "1" forces; anything else is a normal build.
         result = self.ops.build_artifact(file_ref, force=query.get("force") == "1")
-        # Scanned AFTER the build, success or failure, and republished by the
-        # client — the import is precisely the event that changes what the
-        # catalog says about this entry.
-        catalog = self.read_catalog(file_ref)
-        payload = {
-            **result,
-            "ref": self._entry_ref_for_status(file_ref, catalog),
-            "catalog": catalog,
-        }
-        response.send_json(500 if result.get("ok") is False else 200, payload)
+        response.send_json(500 if result.get("ok") is False else 200, result)
 
     def _handle_store_asset(self, request, response, query):
         """A tree served as if it were a directory: ``<tree>/assembly.json`` is
@@ -631,7 +680,7 @@ class CadApp:
         """
         from .drawings import drawing_payload_response
 
-        status, body = drawing_payload_response(self.backend.root_path, query.get("file") or "")
+        status, body = drawing_payload_response(self.backend.root_path, query.get("file") or "", lazy=self.backend.lazy)
         if isinstance(body, bytes):
             response.send_bytes(status, body, "application/json; charset=utf-8")
             return
@@ -700,5 +749,5 @@ class CadApp:
         response.send_bytes(200, container, "application/octet-stream")
 
 
-def create_cad_app(*, root: str, host: str, port: int, dist_dir: str = "") -> CadApp:
-    return CadApp(root=root, host=host, port=port, dist_dir=dist_dir)
+def create_cad_app(*, root: str, host: str, port: int, dist_dir: str = "", lazy: bool = False) -> CadApp:
+    return CadApp(root=root, host=host, port=port, dist_dir=dist_dir, lazy=lazy)

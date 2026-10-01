@@ -9,9 +9,8 @@ import { unavailablePromptContext } from '@text-to-cad/core/prompt';
 import type { ViewerHost } from '@text-to-cad/ui/host';
 import { createTabStore, useTabViewerState } from '@text-to-cad/ui/tab-store';
 import { browserClipboard } from './host/clipboard';
+import { useViewerLinks } from './host/viewerLinks.js';
 import App, { useTabAppearance } from './App';
-import ViewerBrand from './client/components/workbench/ViewerBrand.jsx';
-import ViewerLinks from './client/components/workbench/ViewerLinks.jsx';
 import { readCadParam, readDefaultCadParam } from './client/workbench/sidebar.js';
 import { sessionTabRecord } from './persistence/tabRecord';
 import faviconUrl from './client/assets/favicon.png';
@@ -34,20 +33,23 @@ function StartingView({ error }: { error?: Error }) {
     return { id: 'starting', rootName: 'This directory', stat: (_path, {signal}) => pending(signal), list: (_path, {signal}) => pending(signal) };
   }, [error]);
   const { colorScheme } = useTabAppearance(tabStore);
+  const links = useViewerLinks();
   const host = useMemo<ViewerHost>(() => ({
-    files: source, clipboard: browserClipboard, promptContext: unavailablePromptContext,
+    files: source, clipboard: browserClipboard, promptContext: unavailablePromptContext, links,
     navigation: { openFile: () => {} }, environment: { colorScheme },
-  }), [source, colorScheme]);
+  }), [source, colorScheme, links]);
   return <div className="flex h-svh flex-col overflow-hidden"><div className="min-h-0 flex-1">
-    <FileViewer leading={<ViewerBrand />} navigationActions={<ViewerLinks />} file={file} host={host} renderers={[]} state={state} onStateChange={onStateChange} navigationPath={null}
-      presentation={{loading:<div className="relative h-full"><ViewerLoadingOverlay viewerLoading /></div>, error:() => <div className="relative h-full"><EmptyState icon={FileText} title="No file open" description="Pick one from the tree on the right, or filter by name." /></div>}} />
+    <FileViewer file={file} host={host} renderers={[]} state={state} onStateChange={onStateChange} navigationPath={null}
+      presentation={{loading:<div className="relative h-full"><ViewerLoadingOverlay viewerLoading /></div>, error:() => <div className="relative h-full"><EmptyState icon={FileText} title="No file open" description="Pick one from the files, or filter by name." /></div>}} />
   </div></div>;
 }
 
 const element = document.getElementById('root');
 if (!element) throw new Error('Missing #root mount point.');
 const root = createRoot(element);
-const client = createCadClient({ origin: '', shouldPoll: () => document.visibilityState !== 'hidden' });
+// The catalog is read every two seconds whether or not the tab is seen: a tab in the background is
+// current when it is shown, and its build feed never falls back on a catalog it stopped reading.
+const client = createCadClient({ origin: '' });
 let icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
 if (!icon) { icon = document.createElement('link'); icon.rel = 'icon'; document.head.append(icon); }
 icon.type = 'image/png'; icon.href = faviconUrl;

@@ -67,6 +67,7 @@ __all__ = [
     "VIEWER_SKIPPED_DIRECTORIES",
     "asset_for_path",
     "catalog_input_fingerprint",
+    "catalog_lists",
     "is_hidden_name",
     "is_served_cad_asset",
     "path_is_inside",
@@ -77,6 +78,7 @@ __all__ = [
     "relative_path_stays_inside_root",
     "repo_relative_path",
     "scan_cad_directory",
+    "scan_cad_files",
     "sort_catalog_entries",
     "source_format_for_path",
     "step_kind_from_topology",
@@ -515,6 +517,10 @@ def _listing_rows(dir_path: str) -> list | None:
     return rows
 
 
+def _is_listed_file(name: str) -> bool:
+    return not is_hidden_name(name) and extension_of(name) in SOURCE_EXTENSIONS
+
+
 def _collect_cad_source_files(
     root_path: str, result: list, visited=None, depth: int = 0, real_root: str | None = None
 ) -> list:
@@ -896,6 +902,13 @@ def is_served_cad_asset(file_path) -> bool:
 # --- public scan API ------------------------------------------------------
 
 
+def _catalog_entry(repo_root, root_path: str, source_path: str) -> dict:
+    extension = extension_of(source_path)
+    if extension in (".step", ".stp"):
+        return _create_step_entry(repo_root, root_path, source_path, extension)
+    return _create_single_asset_entry(repo_root, root_path, source_path, extension)
+
+
 def scan_cad_directory(repo_root, *, preferred_file=None, defer_unpreferred=False) -> dict:
     """Scan one directory. It is its own root — a viewer serves exactly one."""
     if not repo_root:
@@ -916,13 +929,41 @@ def scan_cad_directory(repo_root, *, preferred_file=None, defer_unpreferred=Fals
                 "catalogPending": True,
             })
             continue
-        extension = extension_of(source_path)
-        if extension in (".step", ".stp"):
-            entries.append(_create_step_entry(repo_root, root_path, source_path, extension))
-        else:
-            entries.append(
-                _create_single_asset_entry(repo_root, root_path, source_path, extension)
-            )
+        entries.append(_catalog_entry(repo_root, root_path, source_path))
+    return {
+        "schemaVersion": CAD_CATALOG_SCHEMA_VERSION,
+        "entries": sort_catalog_entries(entries),
+    }
+
+
+def catalog_lists(root_path, file_path) -> bool:
+    """Whether a catalog of ``root_path`` lists ``file_path``: a CAD file inside it,
+    with no folder between them that the walk skips, within the walk's depth."""
+    folder = real_path_or(os.path.dirname(os.path.abspath(file_path)))
+    relative = path_relative(real_path_or(os.path.abspath(root_path)), folder)
+    if not relative_path_stays_inside_root(relative) or not _is_listed_file(node_basename(str(file_path))):
+        return False
+    folders = relative.split(os.sep) if relative else []
+    return len(folders) <= SCAN_MAX_DEPTH and not any(_should_skip_directory(part) for part in folders)
+
+
+def scan_cad_files(repo_root, files) -> dict:
+    """The catalog of ``files`` alone: each one under ``repo_root`` that is a CAD file.
+
+    For a root too big to walk -- a whole filesystem -- whose catalog is only the
+    files a view is showing. A file under a hidden or skipped folder is listed:
+    it was named, not found.
+    """
+    root_path = os.path.abspath(repo_root)
+    entries = []
+    for file in files:
+        text = str(file or "").replace("\\", os.sep)
+        if not text:
+            continue
+        source_path = os.path.abspath(text if os.path.isabs(text) else os.path.join(root_path, text))
+        if path_is_inside(source_path, root_path) and _is_listed_file(node_basename(source_path)) \
+                and _file_stats(source_path) is not None:
+            entries.append(_catalog_entry(repo_root, root_path, source_path))
     return {
         "schemaVersion": CAD_CATALOG_SCHEMA_VERSION,
         "entries": sort_catalog_entries(entries),

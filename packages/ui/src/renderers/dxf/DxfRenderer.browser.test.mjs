@@ -30,7 +30,7 @@ const HARNESS_SIZE = '<style>#root > div { width: var(--harness-width, 800px) !i
 let temporary, server, browser;
 before(async () => {
   temporary = await mkdtemp(join(tmpdir(), 'text-to-cad-dxf-browser-'));
-  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl' } });
+  await build({ entryPoints: [fileURLToPath(new URL('../harness/index.tsx', import.meta.url))], outfile: join(temporary, 'harness.js'), bundle: true, format: 'esm', platform: 'browser', conditions: ['production'], jsx: 'automatic', loader: { '.webp': 'dataurl', '.avif': 'dataurl', '.woff2': 'dataurl', '.svg': 'dataurl' } });
   const bundle = await readFile(join(temporary, 'harness.js'));
   const css = await readFile(new URL('../../../dist/styles.css', import.meta.url));
   const files = ['sample.dxf', 'empty.dxf', 'broken.dxf'];
@@ -67,7 +67,8 @@ async function open(t, file) {
   page.setDefaultTimeout(20000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(() => { window.Worker = undefined; });
+  // A clipboard host, like web: these tests drive and measure the drawing itself.
+  await page.addInitScript(() => { window.Worker = undefined; window.__cadPromptDestination = 'clipboard'; });
   await page.goto(`http://127.0.0.1:${server.address().port}/?file=${file}`);
   return { page, errors, pane: page.getByTestId('one') };
 }
@@ -335,7 +336,7 @@ test('an unreadable drawing shows the server’s own sentence, and an empty one 
   assert.match(text, /The viewer couldn’t complete the request/);
   assert.match(text, /HTTP 400/);
   assert.match(text, /not a readable DXF document/);
-  assert.match(text, /Try again/);
+  assert.match(text, /Retry/);
   assert.equal(await broken.pane.locator('[data-viewer-loading]').count(), 0, 'and not a spinner forever');
 
   const empty = await open(t, 'empty.dxf');

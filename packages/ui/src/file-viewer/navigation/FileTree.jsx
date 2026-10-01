@@ -1,5 +1,6 @@
 import { TooltipHint } from "@text-to-cad/ui/primitives/tooltip";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LoaderCircle } from "lucide-react";
 
 import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from "@text-to-cad/ui/primitives/context-menu";
 import { ScrollArea } from "@text-to-cad/ui/primitives/scroll-area";
@@ -13,8 +14,8 @@ import { FileIcon, FolderIcon } from "./icons.jsx";
 import { InlineName } from "./InlineName.jsx";
 
 /**
- * The file surface's tree — the rightmost panel in the nav row's list, in
- * BOTH apps (`panels.js`).
+ * The file surface's tree — the file explorer's content, in every app
+ * (`panels.js`, `FileExplorer.jsx`).
  *
  * Lazy: a directory's children are fetched when it is first expanded and kept
  * afterwards. A recursive read of a repository with `node_modules` in it costs
@@ -35,8 +36,7 @@ import { InlineName } from "./InlineName.jsx";
  * ## The source adapter
  *
  * Where a listing comes from is the one thing the two hosts do not share, so
- * it is a prop rather than an import — the same shape `Breadcrumbs.jsx` takes,
- * for the same reason. The desktop reads a directory at a time over IPC with
+ * it is a prop rather than an import. The desktop reads a directory at a time over IPC with
  * gitignore semantics and a watcher behind it; the web host derives listings
  * from its catalog, so its tree shows the CAD files the catalog knows
  * and the directories containing them. That is the honest web subset and the
@@ -83,9 +83,8 @@ const INDENT = 12;
 
 /**
  * The one inline field the tree can show: a rename over a row, or a new entry
- * in a folder. An edit asked for from OUTSIDE — a crumb's `Rename` or `New
- * folder` — arrives as the same thing plus a nonce, so asking twice is two
- * requests.
+ * in a folder. An edit asked for from OUTSIDE — the navbar's `Rename` — arrives
+ * as the same thing plus a nonce, so asking twice is two requests.
  *
  * @typedef {{ mode: "rename", entry: import("./entry-menu.js").MenuEntryTarget }
  *   | { mode: "create", directory: string, kind: "file"|"directory" }} TreeEditRequest
@@ -99,7 +98,7 @@ const INDENT = 12;
  * @param {{ path: string, directory: boolean }|null} [props.reveal]
  *   A path to expand to and select without opening it. Wins over `activePath`
  *   for the reveal and the scroll; the open file stays highlighted too.
- * @param {TreeEdit|null} [props.edit] A rename or a create the breadcrumb asked for.
+ * @param {TreeEdit|null} [props.edit] A rename or a create asked for from outside the tree.
  * @param {(path: string) => void} props.onOpen
  */
 export function FileTree({ source, activePath, reveal = null, edit = null, onOpen }) {
@@ -305,7 +304,7 @@ export function FileTree({ source, activePath, reveal = null, edit = null, onOpe
   const menuGuard = useEntryMenuFocusGuard(onMenuAction);
 
   /**
-   * A crumb asked for an edit. The folders above it are opened and read first
+   * An edit asked for from outside. The folders above it are opened and read first
    * — a field in a folder the tree has shut is a field nobody sees — and the
    * request is honoured once per nonce.
    */
@@ -362,7 +361,9 @@ export function FileTree({ source, activePath, reveal = null, edit = null, onOpe
           name: entry.name,
           kind: entry.kind,
           depth,
-          expanded: open
+          expanded: open,
+          // Open, and its listing not read yet: its row says so until it is.
+          loading: open && children[entry.path] === undefined
         });
         if (open) {
           walk(entry.path, depth + 1);
@@ -516,7 +517,9 @@ export function FileTree({ source, activePath, reveal = null, edit = null, onOpe
     ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-sidebar/40">
+    // Two rows, the filter and the list: the list takes what the filter leaves, and scrolls once the
+    // panel holding the tree stops growing (the explorer fits its rows, up to the view's height).
+    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] bg-sidebar/40">
       <TreeFilterInput data-mobile-panel-top-row=""
         label="Filter files"
         onChange={setQuery}
@@ -528,9 +531,11 @@ export function FileTree({ source, activePath, reveal = null, edit = null, onOpe
       <ContextMenu modal={false}>
         <ContextMenuTrigger asChild>
           <ScrollArea
-            className="min-h-0 flex-1"
+            className="min-h-0"
             onContextMenu={aim}
-            viewportClassName="px-1 py-1"
+            // A host control floating over the page's bottom (a chat's composer) covers the last
+            // rows: they scroll clear of it, and a revealed row stops above it.
+            viewportClassName="px-1 pt-1 pb-[calc(0.25rem+var(--cad-host-bottom-inset,0px))] scroll-pb-[var(--cad-host-bottom-inset,0px)]"
             viewportProps={{ onKeyDown, role: "tree", tabIndex: 0 }}
             viewportRef={listRef}
           >
@@ -553,7 +558,9 @@ export function FileTree({ source, activePath, reveal = null, edit = null, onOpe
               )
             ) : rows.length === 0 && !newEntryRow ? (
               <p className="px-3 py-6 text-center text-xs text-muted-foreground">
-                {children[""] === undefined ? "Reading…" : `${rootName} is empty`}
+                {children[""] === undefined
+                  ? <span role="status" className="inline-flex items-center gap-1.5"><LoaderCircle className="size-3 animate-spin" aria-hidden="true" />Loading files…</span>
+                  : `${rootName} is empty`}
               </p>
             ) : (
               <>
@@ -612,7 +619,9 @@ function TreeRow({ row, active, cursor, onSelect, onRename }) {
     ) : (
       <FileIcon className="size-3.5 shrink-0 text-muted-foreground" path={row.path} />
     );
-  const chevron = <TreeRowChevron expanded={row.expanded} branch={row.kind === "directory"} />;
+  const chevron = row.loading
+    ? <LoaderCircle className="size-3 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" data-tree-row-loading="" />
+    : <TreeRowChevron expanded={row.expanded} branch={row.kind === "directory"} />;
 
   if (onRename) {
     return (
@@ -641,6 +650,7 @@ function TreeRow({ row, active, cursor, onSelect, onRename }) {
       active={active}
       cursor={cursor}
       aria-expanded={row.kind === "directory" ? row.expanded : undefined}
+      aria-busy={row.loading || undefined}
       aria-selected={active}
       data-kind={row.kind}
       data-path={row.path}

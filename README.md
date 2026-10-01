@@ -115,17 +115,44 @@ Grok Build:
 ```bash
 # Codex (requires Codex 0.142.0 or newer)
 codex plugin marketplace add earthtojake/text-to-cad
-codex plugin add cad@text-to-cad
+codex plugin add cad@earthtojake
 ```
 
 Codex resolves this repository-root plugin only from 0.142.0 onward. On older
 versions the plugin is skipped silently and never appears in `codex plugin list`;
 upgrade with `npm install -g @openai/codex@latest`.
 
+In the Codex app the plugin also brings the CAD viewer: **CAD** in the sidebar
+(recent models, and Open), a **CAD** tab beside each thread that the agent
+drives, and *Open with CAD* for model files. It runs locally through
+[uv](https://docs.astral.sh/uv/): after installing, ask Codex to run the
+plugin's `$cad-mcp-setup` skill (it installs uv if you approve and prepares the pinned
+runtime), then restart the app. To update, upgrade the `earthtojake` marketplace
+(Plugins › Manage › Marketplace, or `codex plugin marketplace upgrade earthtojake`)
+and restart the app: its first start downloads the new runtime. The marketplace was renamed from `text-to-cad`
+to `earthtojake`; if you added it before, remove the old one first
+(`codex plugin marketplace remove text-to-cad`).
+
 ```bash
 # Claude Code
 claude plugin marketplace add earthtojake/text-to-cad
-claude plugin install cad@text-to-cad
+claude plugin install cad@earthtojake
+```
+
+In Claude Desktop, CAD shows models in the chat: ask Claude to show one and it
+appears as a viewer card you can orbit, add to your prompt, and open full size;
+Claude can read what you selected and see what you see. It runs locally through
+[uv](https://docs.astral.sh/uv/): add the server to Claude Desktop's config
+(Settings > Developer > Edit Config), then restart the app. If Claude Desktop
+cannot find `uvx`, give its full path (`which uvx`). Each start runs the newest
+release, so restarting the app updates it.
+
+```json
+{
+  "mcpServers": {
+    "cad": { "command": "uvx", "args": ["--from", "cadgen", "cadgen", "mcp"] }
+  }
+}
 ```
 
 Grok Build uses the existing `.claude-plugin/marketplace.json`; there is no
