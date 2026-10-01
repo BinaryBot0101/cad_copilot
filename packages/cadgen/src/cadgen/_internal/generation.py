@@ -54,8 +54,12 @@ from cadgen._internal.generation_spec import (
 def _sha256_of(path: Path) -> str:
     import hashlib
 
+    from cadgen._internal.atomic_replace import open_with_ladder
+
+    # Through the ladder: a peer build publishing the same model may be renaming
+    # over this very file, which Windows refuses an open for (STORE.md §7).
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with open_with_ladder(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -630,9 +634,11 @@ def _generate_part_outputs(
                     record["geometryClosure"] = geometry_closure
         if generated:
             from cadgen.store.publish import decide
-            from cadgen.store.trees import tree_complete
+            from cadgen.store.trees import claim_tree
 
-            if not tree_complete(tree_hash) or (writes_step and not tree_complete(document_tree_hash)):
+            # Claimed, not just checked: the record below names these closures,
+            # so no sweep may take any part of them from here on (STORE.md §8).
+            if not claim_tree(tree_hash) or (writes_step and not claim_tree(document_tree_hash)):
                 raise RuntimeError(f"{spec.cad_ref}: result was not saved: pinned geometry disappeared from the cache during the build")
             # A re-emitted STEP has an immutable byte/annotation input closure,
             # not a Python source closure that current_closure_hash can read.
