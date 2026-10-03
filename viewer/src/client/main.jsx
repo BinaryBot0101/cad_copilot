@@ -29,7 +29,7 @@ function bootstrap() {
     throw new Error(`Missing #${ROOT_ID} mount point.`);
   }
   ensureFavicon();
-  document.title = "CAD Viewer";
+  document.title = "XICOR CAD Viewer";
   const cachedRoot = globalThis[ROOT_CACHE_KEY];
   const root = cachedRoot?.element === rootElement && cachedRoot?.root
     ? cachedRoot.root
