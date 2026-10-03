@@ -20,7 +20,7 @@ function ensureFavicon() {
     document.head.appendChild(icon);
   }
   icon.type = "image/x-icon";
-  icon.href = `${faviconUrl}?v=planetary-gear-workbench`;
+  icon.href = `${faviconUrl}?v=xicor-x`;
 }
 
 function bootstrap() {
